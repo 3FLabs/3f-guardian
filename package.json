@@ -1,15 +1,32 @@
 {
-  "name": "bun-guardian",
-  "version": "1.0.50",
+  "name": "3f-guardian",
+  "version": "0.1.0",
+  "type": "module",
+  "module": "src/index.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "bun run --watch src/index.ts"
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "oxlint src tests",
+    "lint:fix": "oxlint --fix src tests",
+    "format": "oxfmt src tests",
+    "format:check": "oxfmt --check src tests",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "elysia": "latest"
+    "@elysiajs/openapi": "^1.4.15",
+    "@noble/hashes": "^2.2.0",
+    "better-result": "^2.9.0",
+    "elysia": "^1.4.28",
+    "viem": "^2.48.4",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
-    "bun-types": "latest"
-  },
-  "module": "src/index.js"
+    "@types/bun": "latest",
+    "oxfmt": "^0.47.0",
+    "oxlint": "^1.62.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.5"
+  }
 }
