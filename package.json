@@ -6,8 +6,8 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "build": "bun run --filter '*' build",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "bun run --filter '*' test",
+    "test:watch": "bun run --filter '*' test:watch",
     "typecheck": "bun run --filter '*' typecheck",
     "lint": "oxlint packages/*/src packages/*/tests",
     "lint:fix": "oxlint --fix packages/*/src packages/*/tests",

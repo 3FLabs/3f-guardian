@@ -32,7 +32,8 @@
     "build": "tsc -p tsconfig.build.json",
     "build:clean": "rm -rf dist && bun run build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@3flabs/guardian": "workspace:*",

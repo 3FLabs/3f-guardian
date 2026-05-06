@@ -2,7 +2,11 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["bun"]
+    "types": ["bun"],
+    "baseUrl": ".",
+    "paths": {
+      "@3flabs/guardian": ["../guardian/src/index.ts"]
+    }
   },
   "include": ["src/**/*", "tests/**/*"]
 }

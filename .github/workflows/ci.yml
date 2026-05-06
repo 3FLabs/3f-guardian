@@ -7,7 +7,7 @@ on:
 
 jobs:
   verify:
-    name: lint + typecheck + test + build
+    name: build + lint + typecheck + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +20,12 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
+      # Build first so downstream packages resolve the workspace
+      # dependency's `dist/index.d.ts` (per the `exports` map). Without
+      # this, typecheck sees `Cannot find module '@3flabs/guardian'`.
+      - name: Build
+        run: bun run build
+
       - name: Lint
         run: bun run lint
 
@@ -31,6 +37,3 @@ jobs:
 
       - name: Test
         run: bun run test
-
-      - name: Build
-        run: bun run build
