@@ -1,0 +1,97 @@
+/**
+ * Public entry point. Re-exports the build-server function and the
+ * abstractions contract so callers can:
+ *
+ *   import { buildGuardianServer, type GuardianAbstractions } from "@3flabs/guardian";
+ *
+ *   const abs: GuardianAbstractions = makeMyAbstractions();
+ *   buildGuardianServer(abs).listen(3000);
+ *
+ * No abstraction is implemented here. This package is the HTTP shell.
+ * Default Logger / rate-limiter / Appendix-A check builders live in the
+ * companion `@3flabs/guardian-defaults` package.
+ */
+export { buildGuardianServer, type GuardianServer } from "./server.js";
+export type {
+  EndpointScope,
+  GuardianAbstractions,
+  GuardianMetadata,
+  LivenessProbe,
+  RateLimitWindow,
+  SignTypedData,
+  SignTypedDataError,
+  SigningContext,
+  SignIntentFundBinding,
+  SignIntentRequestBinding,
+  SignIntentSwap,
+  SignRequestWhitelisting,
+  TokenInfo,
+  ValidateAndSign,
+} from "./abstractions.js";
+export { ENDPOINT_SCOPES } from "./abstractions.js";
+
+// Tagged error classes — implementers construct these inside their
+// abstraction implementations to drive HTTP status mapping.
+export {
+  BadRequestError,
+  ForbiddenError,
+  InternalError,
+  NotFoundError,
+  RateLimitedError,
+  StateConflictError,
+  UnauthenticatedError,
+  UnsupportedChainError,
+  UnsupportedMediaTypeError,
+  UpstreamUnavailableError,
+  ValidationFailedError,
+  type GuardianError,
+  type SigningError,
+} from "./errors/tagged.js";
+
+// Schema types & values — exposed so implementers can reuse them when
+// validating their own dependencies (e.g., the response shape of an
+// off-chain DB) and so test code can build typed fixtures.
+export {
+  zSigningSuccess,
+  zErrorEnvelope,
+  type SigningSuccess,
+  type ErrorEnvelope,
+  type ErrorCode,
+} from "./schemas/responses.js";
+export { type CheckEntry, zCheckEntry, zChecks } from "./schemas/checks.js";
+export {
+  type IntentRequestBindingBody,
+  zIntentRequestBindingBody,
+} from "./schemas/intent-request-binding.js";
+export {
+  type IntentFundBindingBody,
+  zIntentFundBindingBody,
+} from "./schemas/intent-fund-binding.js";
+export {
+  type IntentSwapBody,
+  type SwapLeg,
+  zIntentSwapBody,
+  zSwapLeg,
+} from "./schemas/intent-swap.js";
+export {
+  type RequestWhitelistingBody,
+  type RequestWhitelistingResponse,
+  type WhitelistOperation,
+  zRequestWhitelistingBody,
+  zRequestWhitelistingResponse,
+  zWhitelistOperation,
+} from "./schemas/request-whitelisting.js";
+export { type HealthResponse, zHealthResponse } from "./schemas/health.js";
+export { type VersionResponse, zVersionResponse } from "./schemas/version.js";
+
+// Helpers for implementers building check arrays.
+export { failed, passed, skipped } from "./lib/checks.js";
+
+// Logger contract + noop fallback. Implementers can pass a real pino
+// instance directly (it is structurally assignable to `Logger`), or use
+// `pinoLogger()` from `@3flabs/guardian-defaults`.
+export { type Logger, type LogFn, noopLogger } from "./lib/logger.js";
+
+// Convenience SignTypedData implementations. KMS- / HSM-backed signers
+// belong to the host; this is the dev/test private-key envelope.
+export { privateKeyToSignTypedData } from "./signers/private-key.js";
