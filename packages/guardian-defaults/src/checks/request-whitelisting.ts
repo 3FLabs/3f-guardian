@@ -1,148 +1,96 @@
 import { Result } from "better-result";
+import { type Address } from "viem";
 
-import { type RequestWhitelistingBody, UpstreamUnavailableError } from "@3flabs/guardian";
-import type { CheckEntry, SigningContext } from "@3flabs/guardian";
-
-import { checkDeadline, checkMembership, checkNonceWindow, rollUp } from "./helpers.js";
 import {
-  type IntentRequestBindingPolicy,
-  type RequestContractReader,
-} from "./intent-request-binding.js";
+  type CheckEntry,
+  type RequestWhitelistingBody,
+  type SigningContext,
+  UpstreamUnavailableError,
+} from "@3flabs/guardian";
+
+import { whitelistBookAbi } from "../abi/whitelist-book.js";
+import { checkDeadline, checkNonceWindow, rollUp } from "./helpers.js";
+import { type IntentRequestBindingPolicy, runA1 } from "./intent-request-binding.js";
 import type { CheckRunner, CheckRunnerError } from "./types.js";
 
 /**
- * §A.4 policy. The contract-side policy fields mirror §A.1 because for
- * `operation = "whitelist"` Appendix A.4 says "the checks of §A.1,
- * applied independently to each entry of `requestContracts`. The first
- * three checks are contract-specific; the deadline check is request-
- * wide."
+ * §A.4 policy. The contract-side fields mirror §A.1 because for
+ * `operation = "whitelist"` Appendix A.4 says "the §A.1 checks applied
+ * independently to each entry of `requestContracts`. The first three
+ * checks are contract-specific; the deadline check is request-wide."
  *
  * `maxNonceAboveFloor` is a bigint to keep the on-chain nonce
  * arithmetic exact.
  */
 export type RequestWhitelistingPolicy = IntentRequestBindingPolicy & {
-  /** §11 MAX_NONCE_ABOVE_FLOOR. */
   readonly maxNonceAboveFloor: bigint;
-};
-
-/**
- * Adapter port for whitelist-book reads.
- *
- *  - `readNonceFloor` returns the on-chain monotonic floor.
- *  - `readNonceConsumed` returns true iff the supplied nonce is
- *    already recorded as consumed by the on-chain whitelist book.
- */
-export type WhitelistBookReader = {
-  readonly readNonceFloor: (ctx: SigningContext, whitelistBook: string) => Promise<bigint>;
-  readonly readNonceConsumed: (
-    ctx: SigningContext,
-    args: { whitelistBook: string; nonce: bigint },
-  ) => Promise<boolean>;
 };
 
 /**
  * Builds the §A.4 check runner.
  *
- * For both operations:
- *   - the three nonce checks (consumed / floor / ceiling) apply
- *     verbatim per Appendix A.4.
+ * For both operations the request-wide nonce checks (consumed / floor /
+ * ceiling) and deadline check apply. For `operation = "whitelist"` we
+ * additionally apply the §A.1 contract-specific checks (factory,
+ * owner, puller, consumer) to each entry of `requestContracts`. To
+ * keep the §6.4.1 checks array readable, per-contract entries are
+ * emitted with their `for <address>` suffix preserved by the runner.
  *
- * For `operation = "whitelist"`:
- *   - the first three §A.1 contract-specific checks (origin, owner,
- *     puller, consumer) apply to each entry of `requestContracts`. To
- *     keep the §6.4.1 checks array readable, per-contract entries are
- *     suffixed with `for <address>`.
+ * The whitelist book uses **per-validator** nonce state, so the runner
+ * needs the Guardian's signer address to read its floor and bitmap.
+ * Hosts pass it as `guardianSigner` — typically the value from
+ * `GuardianAbstractions.metadata.guardianSigner`.
  *
- * For `operation = "unwhitelist"`:
- *   - only the request-wide deadline check applies.
- *
- * The deadline check is request-wide in both modes.
- *
- * Per §A.4, all rejections are 422-class. The §7.6 sentinel rejection
- * (`nonce = 2^256 − 1` ⇒ 400 bad_request) is the schema's job and is
- * not visible here.
+ * Per §A.4 every rejection is 422-class. The §7.6 sentinel rejection
+ * (`nonce = 2^256 − 1` ⇒ 400 bad_request) is enforced by the schema and
+ * never reaches this runner.
  */
 export function buildRequestWhitelistingChecks(deps: {
   policy: RequestWhitelistingPolicy;
-  requestReader: RequestContractReader;
-  bookReader: WhitelistBookReader;
+  guardianSigner: Address;
 }): CheckRunner<RequestWhitelistingBody, false> {
-  const { policy, requestReader, bookReader } = deps;
+  const { policy, guardianSigner } = deps;
 
-  return async (ctx, body): Promise<Result<readonly CheckEntry[], CheckRunnerError<false>>> => {
+  return async (
+    ctx: SigningContext,
+    body: RequestWhitelistingBody,
+  ): Promise<Result<readonly CheckEntry[], CheckRunnerError<false>>> => {
     const checks: CheckEntry[] = [];
     const nowSec = Math.floor(ctx.now.getTime() / 1000);
 
-    // 1. Per-operation contract-side checks.
+    // 1. Per-contract §A.1 checks (whitelist op only). Sequential per
+    //    contract: each one does its own multicall + role-events scan,
+    //    and parallelising across N contracts would hammer the upstream
+    //    RPC (especially the eth_getLogs windows). We bail on the first
+    //    UpstreamUnavailableError so the wire-level state is consistent.
     if (body.operation === "whitelist") {
-      // For each request contract: origin / owner / puller / consumer.
-      // We don't run per-contract deadline checks (deadline is request-wide).
-      const acceptedOrigins = policy.acceptedRequestOrigins.get(body.chainId) ?? new Set<string>();
-      const acceptedOwners = policy.acceptedOwners.get(body.chainId) ?? new Set<string>();
-      const acceptedPullers = policy.acceptedPullers.get(body.chainId) ?? new Set<string>();
-      const acceptedConsumers = policy.acceptedConsumers.get(body.chainId) ?? new Set<string>();
-
       for (const requestContract of body.requestContracts) {
-        const onOrigins = checkMembership({
-          description: `request contract is on the accepted-origins policy (for ${requestContract})`,
-          value: requestContract,
-          accepted: acceptedOrigins,
-          addressLike: true,
-        });
-        checks.push(onOrigins);
-
-        if (!onOrigins.passed) {
-          // Skip on-chain reads for an off-policy contract.
-          continue;
-        }
-
-        let owner: string;
-        let puller: string;
-        let consumer: string;
-        try {
-          // Sequential per-contract on purpose: the batch may carry
-          // many contracts and parallelising N×3 RPCs across the whole
-          // batch would flood the upstream node. We do parallelise the
-          // three reads per contract, just not across contracts.
-          // oxlint-disable-next-line no-await-in-loop
-          [owner, puller, consumer] = await Promise.all([
-            requestReader.readOwner(ctx, requestContract),
-            requestReader.readPuller(ctx, requestContract),
-            requestReader.readConsumer(ctx, requestContract),
-          ]);
-        } catch (e) {
-          ctx.logger.error(
-            { err: e instanceof Error ? e.message : e, requestContract },
-            "A.4: per-contract on-chain read failed",
-          );
-          return Result.err(
-            new UpstreamUnavailableError({
-              message: `request-contract read failed for ${requestContract}: ${e instanceof Error ? e.message : "unknown"}`,
-              status: 503,
-            }),
-          );
-        }
-
-        checks.push(
-          checkMembership({
-            description: `owner of request contract is on the accepted-owners list (for ${requestContract})`,
-            value: owner,
-            accepted: acceptedOwners,
-            addressLike: true,
-          }),
-          checkMembership({
-            description: `puller role on request contract is restricted to accepted parties (for ${requestContract})`,
-            value: puller,
-            accepted: acceptedPullers,
-            addressLike: true,
-          }),
-          checkMembership({
-            description: `consumer role on request contract is restricted to accepted parties (for ${requestContract})`,
-            value: consumer,
-            accepted: acceptedConsumers,
-            addressLike: true,
-          }),
+        // oxlint-disable-next-line no-await-in-loop
+        const r = await runA1(
+          ctx,
+          { chainId: body.chainId, requestContract, deadline: body.deadline },
+          policy,
         );
+        if (r.isErr()) {
+          // runA1 may emit a ValidationFailedError (rolled-up checks)
+          // OR an UpstreamUnavailableError. Validation failures
+          // contribute their entries verbatim with the per-contract
+          // suffix so the §6.4.1 array describes the full batch; RPC
+          // failures bail immediately.
+          if (r.error instanceof UpstreamUnavailableError) {
+            return Result.err(r.error);
+          }
+          for (const entry of r.error.checks) {
+            checks.push(suffixed(entry, requestContract));
+          }
+        } else {
+          // Drop the §A.1 deadline check — it duplicates the request-
+          // wide one we add below — and suffix the rest.
+          for (const entry of r.value) {
+            if (entry.description.startsWith("deadline within")) continue;
+            checks.push(suffixed(entry, requestContract));
+          }
+        }
       }
     }
 
@@ -155,15 +103,30 @@ export function buildRequestWhitelistingChecks(deps: {
       }),
     );
 
-    // 3. Nonce checks (both operations).
+    // 3. Whitelist-book nonce reads (request-wide, both operations).
     const nonce = BigInt(body.nonce);
     let floor: bigint;
     let consumed: boolean;
     try {
-      [floor, consumed] = await Promise.all([
-        bookReader.readNonceFloor(ctx, body.whitelistBook),
-        bookReader.readNonceConsumed(ctx, { whitelistBook: body.whitelistBook, nonce }),
-      ]);
+      const [floorResult, consumedResult] = await ctx.client.multicall({
+        contracts: [
+          {
+            address: body.whitelistBook,
+            abi: whitelistBookAbi,
+            functionName: "validatorNonceFloor",
+            args: [guardianSigner],
+          },
+          {
+            address: body.whitelistBook,
+            abi: whitelistBookAbi,
+            functionName: "isNonceConsumed",
+            args: [guardianSigner, nonce],
+          },
+        ] as const,
+        allowFailure: false,
+      });
+      floor = floorResult;
+      consumed = consumedResult;
     } catch (e) {
       ctx.logger.error(
         { err: e instanceof Error ? e.message : e, whitelistBook: body.whitelistBook },
@@ -189,4 +152,16 @@ export function buildRequestWhitelistingChecks(deps: {
     const r = rollUp(checks, "Appendix A.4 checks failed");
     return r.ok ? Result.ok(r.checks) : Result.err(r.error);
   };
+}
+
+/**
+ * Appends `(for <addr>)` to a §A.1 entry's description so the §A.4
+ * batch result can disambiguate which request contract each entry
+ * belongs to. Preserves the `passed` / `skipped` flags and reason.
+ */
+function suffixed(entry: CheckEntry, contract: string): CheckEntry {
+  const description = `${entry.description} (for ${contract})`;
+  if (entry.skipped) return { description, passed: true, skipped: true };
+  if (entry.passed) return { description, passed: true, skipped: false };
+  return { description, passed: false, skipped: false, reason: entry.reason ?? "failed" };
 }
