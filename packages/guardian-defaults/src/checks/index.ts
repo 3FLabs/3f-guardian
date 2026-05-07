@@ -20,7 +20,6 @@ export {
 export {
   buildIntentFundBindingChecks,
   type IntentFundBindingPolicy,
-  type FundContractReader,
 } from "./intent-fund-binding.js";
 
 export {

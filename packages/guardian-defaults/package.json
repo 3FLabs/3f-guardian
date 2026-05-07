@@ -1,6 +1,6 @@
 {
   "name": "@3flabs/guardian-defaults",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Default Logger, in-memory rate limiter, and Appendix-A check builders for @3flabs/guardian.",
   "type": "module",
   "main": "./dist/index.js",
@@ -23,7 +23,11 @@
       "import": "./dist/checks/index.js"
     }
   },
-  "files": ["dist", "src", "README.md"],
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "publishConfig": {
     "access": "public",
     "provenance": true

@@ -1,197 +1,189 @@
 import { Result } from "better-result";
+import { type Address, zeroAddress } from "viem";
 
 import {
+  type CheckEntry,
   type IntentFundBindingBody,
+  type SigningContext,
   StateConflictError,
   UpstreamUnavailableError,
 } from "@3flabs/guardian";
-import type { CheckEntry, SigningContext } from "@3flabs/guardian";
 
-import { checkDeadline, checkMembership, failed, passed, skipped, rollUp } from "./helpers.js";
+import { facilityAbi, fundAbi } from "../abi/index.js";
+import { checkDeadline, checkMembership, failed, passed, rollUp, skipped } from "./helpers.js";
 import type { CheckRunner, CheckRunnerError } from "./types.js";
 
 /**
- * Per-chain accepted-funds + role policy (§11). The role and
- * collateral lookups are protocol-specific and provided via the
- * `FundContractReader` adapter port.
+ * Per-chain accepted-funds + accepted-owners policy for §A.2.
+ *
+ *  - `acceptedFunds`  — the §11 ACCEPTED_FUNDS list, indexed by chainId.
+ *  - `acceptedOwners` — the set of EOAs / multisigs allowed to own a fund
+ *    contract on that chain. Applied uniformly: every accepted fund's
+ *    `Ownable.owner()` must be on this set.
+ *
+ * Both sets are case-insensitive — entries are compared after lower-
+ * casing both sides (see `checkMembership`'s `addressLike: true`).
  */
 export type IntentFundBindingPolicy = {
   readonly maxDeadlineSecondsAhead: number;
-  /** §11 ACCEPTED_FUNDS, keyed by chainId. */
   readonly acceptedFunds: ReadonlyMap<number, ReadonlySet<string>>;
+  readonly acceptedOwners: ReadonlyMap<number, ReadonlySet<string>>;
 };
 
 /**
- * Adapter port for protocol-specific reads on the fund contract.
+ * Builds the §A.2 fund-binding check runner.
  *
- *  - `readHasActiveOrders` MUST return true iff the fund currently
- *    holds any non-final orders that would be invalidated by a binding
- *    transition. The result drives the only 409-class check in v1.
- *  - `readHoldsRequiredRoles` is a single boolean: the fund either
- *    holds every role policy requires, or it doesn't. Granular role
- *    enumeration is out of scope; the host's adapter is expected to
- *    encapsulate the AND of per-role checks.
- *  - `readPresentOnExternalRegistry` MAY return `null` for funds whose
- *    adapter does not require an external registry check; the runner
- *    then emits a `skipped:true` entry per Appendix A.2.
- *  - `readPositionManagerCollateralMatches` returns true iff the bound
- *    collateral on `positionManager` matches the policy for this fund.
- *    The "policy for this fund" is encapsulated in the adapter — the
- *    runner does not see the expected collateral list.
- */
-export type FundContractReader = {
-  readonly readHasActiveOrders: (ctx: SigningContext, fundContract: string) => Promise<boolean>;
-  readonly readHoldsRequiredRoles: (ctx: SigningContext, fundContract: string) => Promise<boolean>;
-  readonly readPresentOnExternalRegistry: (
-    ctx: SigningContext,
-    fundContract: string,
-  ) => Promise<boolean | null>;
-  readonly readPositionManagerCollateralMatches: (
-    ctx: SigningContext,
-    args: { fundContract: string; positionManager: string },
-  ) => Promise<boolean>;
-};
-
-/**
- * Builds the §A.2 check runner.
+ * Performs the policy + on-chain checks the v1 spec calls out, in this
+ * order (matches §6.4.1 emission):
  *
- * The fund-state check is the only 409-class check in v1. Per §6.6.1,
- * 422 wins when both classes fail in the same request. The runner
- * therefore:
+ *   1. deadline within MAX_DEADLINE_SECONDS_AHEAD of now           (422)
+ *   2. fund contract is on the accepted-funds list                 (422)
+ *   3. fund contract owner is on the accepted-owners list          (422)
+ *   4. intent has no currently bound fund                          (409)
+ *   5. fund holds DEPOSITOR_ROLE for the facility (skipped)        (—)
  *
- *   1. Evaluates every check (no early termination on 409).
- *   2. If ANY 422-class check failed → returns
- *      `Err(ValidationFailedError({ checks }))` with all entries.
- *   3. Else if the 409-class check failed → returns
- *      `Err(StateConflictError({ checks }))` with all entries
- *      (per the spec, `checks` MAY be present on 409 responses).
- *   4. Else → `Ok(checks)`.
+ * Stage 1 multicall reads `fund.owner()` and `facility.getIntent(id)` in
+ * a single round-trip — viem decodes each call to its ABI return type
+ * via the `as const` contracts tuple. `allowFailure: false` is used so
+ * that any single revert / RPC failure throws and surfaces as
+ * `UpstreamUnavailableError` (503), which is what the spec calls for.
  *
- * RPC failures bubble out as `UpstreamUnavailableError` immediately.
+ * Per §6.6.1 the runner reports 422 if any 422-class check fails, even
+ * when the 409 check (intent-has-no-current-fund) also fails. The 409
+ * path is reached only when every 422-class entry passes.
+ *
+ * Two checks the spec discusses are intentionally omitted:
+ *
+ *  - Cross-intent collision ("fund is not bound to a different intent"):
+ *    no efficient on-chain enumeration exists; the on-chain `setFund`
+ *    call will revert anyway. Surfacing it pre-flight would only risk
+ *    making the Guardian's view inconsistent with the chain.
+ *
+ *  - Proposed-fund internal-state cleanliness: `IFund` exposes only
+ *    per-order `state(Order)`, not a free/busy getter, so we cannot
+ *    cheaply ascertain that the proposed fund is idle without adding a
+ *    new view to grunt. The on-chain `create()` path inside `setFund`
+ *    will reject a busy fund — same fail-on-chain semantics as above.
  */
 export function buildIntentFundBindingChecks(deps: {
   policy: IntentFundBindingPolicy;
-  reader: FundContractReader;
 }): CheckRunner<IntentFundBindingBody, true> {
-  const { policy, reader } = deps;
+  const { policy } = deps;
 
-  return async (ctx, body): Promise<Result<readonly CheckEntry[], CheckRunnerError<true>>> => {
-    const { chainId, fundContract, positionManager, deadline } = body;
-    const accepted = policy.acceptedFunds.get(chainId) ?? new Set<string>();
+  return async (
+    ctx: SigningContext,
+    body: IntentFundBindingBody,
+  ): Promise<Result<readonly CheckEntry[], CheckRunnerError<true>>> => {
+    const { chainId, facility, intent, fundContract, deadline } = body;
+    const intentId = BigInt(intent.id);
+
+    const acceptedFunds = policy.acceptedFunds.get(chainId) ?? new Set<string>();
+    const acceptedOwners = policy.acceptedOwners.get(chainId) ?? new Set<string>();
+
+    const nowUnix = Math.floor(ctx.now.getTime() / 1000);
+    const deadlineCheck = checkDeadline({
+      nowUnixSeconds: nowUnix,
+      deadline,
+      maxSecondsAhead: policy.maxDeadlineSecondsAhead,
+    });
     const fundOnList = checkMembership({
       description: "fund contract is on the accepted-funds list",
       value: fundContract,
-      accepted,
+      accepted: acceptedFunds,
       addressLike: true,
     });
 
-    // If fund is not on policy, on-chain reads are meaningless. Emit
-    // skipped entries for the contract-state checks and return.
+    // Off-chain short-circuit: if the fund isn't on policy, on-chain
+    // reads are meaningless. Emit `skipped:true` for every on-chain
+    // entry so the response still describes Appendix A.2 in full.
     if (!fundOnList.passed) {
-      const checks: CheckEntry[] = [
+      const all: CheckEntry[] = [
+        deadlineCheck,
         fundOnList,
-        skipped("fund is in a state compatible with binding (no active orders)"),
-        skipped("fund holds the roles required by policy"),
-        skipped("fund is present on the applicable external registry"),
-        skipped("position manager bound collateral matches policy"),
-        checkDeadline({
-          nowUnixSeconds: Math.floor(ctx.now.getTime() / 1000),
-          deadline,
-          maxSecondsAhead: policy.maxDeadlineSecondsAhead,
-        }),
+        skipped("fund contract owner is on the accepted-owners list"),
+        skipped("intent has no currently bound fund"),
+        skipped("fund holds DEPOSITOR_ROLE for the facility"),
       ];
-      const r = rollUp(checks, "Appendix A.2 checks failed");
+      const r = rollUp(all, "Appendix A.2 checks failed");
       return r.ok ? Result.ok(r.checks) : Result.err(r.error);
     }
 
-    let hasActiveOrders: boolean;
-    let holdsRoles: boolean;
-    let onRegistry: boolean | null;
-    let collateralOk: boolean;
+    // ── Single multicall: independent reads ──────────────────────────
+    // `as const` lets viem infer the per-call decoded type. With
+    // `allowFailure: false`, results are the decoded values directly,
+    // and any single revert / RPC failure throws — caught below.
+    let stage1Results;
     try {
-      [hasActiveOrders, holdsRoles, onRegistry, collateralOk] = await Promise.all([
-        reader.readHasActiveOrders(ctx, fundContract),
-        reader.readHoldsRequiredRoles(ctx, fundContract),
-        reader.readPresentOnExternalRegistry(ctx, fundContract),
-        reader.readPositionManagerCollateralMatches(ctx, { fundContract, positionManager }),
-      ]);
+      stage1Results = await ctx.client.multicall({
+        contracts: [
+          { address: fundContract, abi: fundAbi, functionName: "owner" },
+          { address: facility, abi: facilityAbi, functionName: "getIntent", args: [intentId] },
+        ] as const,
+        allowFailure: false,
+      });
     } catch (e) {
       ctx.logger.error(
-        { err: e instanceof Error ? e.message : e, fundContract },
-        "A.2: on-chain read failed",
+        { err: e instanceof Error ? e.message : e, fundContract, facility, intentId: intent.id },
+        "A.2: stage 1 multicall failed",
       );
       return Result.err(
         new UpstreamUnavailableError({
-          message: `fund-contract read failed: ${e instanceof Error ? e.message : "unknown"}`,
+          message: `fund-binding read failed: ${e instanceof Error ? e.message : "unknown"}`,
           status: 503,
         }),
       );
     }
 
-    const stateCheck = hasActiveOrders
-      ? failed(
-          "fund is in a state compatible with binding (no active orders)",
-          "fund has active orders; retry after they clear",
-        )
-      : passed("fund is in a state compatible with binding (no active orders)");
+    const [fundOwner, intentTuple] = stage1Results;
+    const currentFund = intentTuple[1] as Address;
 
-    const rolesCheck = holdsRoles
-      ? passed("fund holds the roles required by policy")
-      : failed(
-          "fund holds the roles required by policy",
-          "fund is missing one or more policy-required roles",
-        );
-
-    const registryCheck =
-      onRegistry === null
-        ? skipped("fund is present on the applicable external registry")
-        : onRegistry
-          ? passed("fund is present on the applicable external registry")
-          : failed(
-              "fund is present on the applicable external registry",
-              "fund not present on the configured external registry",
-            );
-
-    const collateralCheck = collateralOk
-      ? passed("position manager bound collateral matches policy")
-      : failed(
-          "position manager bound collateral matches policy",
-          "position manager bound collateral does not match policy for this fund",
-        );
-
-    const deadlineCheck = checkDeadline({
-      nowUnixSeconds: Math.floor(ctx.now.getTime() / 1000),
-      deadline,
-      maxSecondsAhead: policy.maxDeadlineSecondsAhead,
+    const ownerCheck = checkMembership({
+      description: "fund contract owner is on the accepted-owners list",
+      value: fundOwner,
+      accepted: acceptedOwners,
+      addressLike: true,
     });
 
+    // 409-class: the intent must have no currently bound fund. The
+    // on-chain `setFund` will revert if a current fund exists, so this
+    // check just makes the Guardian view consistent with the chain.
+    const noCurrentFundCheck =
+      currentFund === zeroAddress
+        ? passed("intent has no currently bound fund")
+        : failed(
+            "intent has no currently bound fund",
+            `intent ${intent.id} is currently bound to ${currentFund}; ` +
+              `unbind (setFund(0,...)) before rebinding to a new fund`,
+          );
+
+    // Depositor-role check: not yet enforced. Emitted as `skipped:true`
+    // (which counts as passed per §6.4.1) so the response advertises
+    // §A.2 in full and operators can see it on the wire when they wire
+    // it up later.
+    const depositorRoleCheck = skipped("fund holds DEPOSITOR_ROLE for the facility");
+
     const all: readonly CheckEntry[] = [
-      fundOnList,
-      stateCheck,
-      rolesCheck,
-      registryCheck,
-      collateralCheck,
       deadlineCheck,
+      fundOnList,
+      ownerCheck,
+      noCurrentFundCheck,
+      depositorRoleCheck,
     ];
 
-    // Partition: 422-class is everything except the fund-state check.
-    const class422 = [fundOnList, rolesCheck, registryCheck, collateralCheck, deadlineCheck];
-    const any422Failed = class422.some((c) => !c.passed);
-    if (any422Failed) {
+    // §6.6.1: 422 wins over 409 when both fail.
+    const class422 = [deadlineCheck, fundOnList, ownerCheck, depositorRoleCheck];
+    if (class422.some((c) => !c.passed)) {
       const r = rollUp(all, "Appendix A.2 checks failed");
-      // r.ok is false because at least one 422 failed.
       return r.ok ? Result.ok(r.checks) : Result.err(r.error);
     }
-
-    if (!stateCheck.passed) {
+    if (!noCurrentFundCheck.passed) {
       return Result.err(
         new StateConflictError({
-          message: "Fund state incompatible with binding (Appendix A.2)",
+          message: "Intent already has a fund bound (Appendix A.2)",
           checks: [...all],
         }),
       );
     }
-
     return Result.ok(all);
   };
 }
