@@ -15,7 +15,7 @@
     "format:check": "oxfmt --check packages/*/src packages/*/tests",
     "changeset": "changeset",
     "changeset:version": "changeset version && bun install --lockfile-only",
-    "changeset:publish": "bun run build && changeset publish"
+    "changeset:publish": "bun run build && bun run scripts/rewrite-workspace-deps.ts && changeset publish"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.10",
