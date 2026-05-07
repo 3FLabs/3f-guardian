@@ -1,0 +1,303 @@
+{
+  "name": "OwnableMockFund",
+  "abi": [
+    {
+      "type": "constructor",
+      "inputs": [
+        {
+          "name": "owner_",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "asset_",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "share_",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "asset",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "assetAddr",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "hasAllRoles",
+      "inputs": [
+        {
+          "name": "user",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "roles",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "owner",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "ownerAddr",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "rolesOf",
+      "inputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "setOrderState",
+      "inputs": [
+        {
+          "name": "order",
+          "type": "tuple",
+          "internalType": "struct OwnableMockFund.Order",
+          "components": [
+            {
+              "name": "mode",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "owner_",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "receiver",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "input",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "output",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "salt",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            }
+          ]
+        },
+        {
+          "name": "s",
+          "type": "uint8",
+          "internalType": "uint8"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "setOwner",
+      "inputs": [
+        {
+          "name": "newOwner",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "setRoles",
+      "inputs": [
+        {
+          "name": "user",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "roles",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "share",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "shareAddr",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "state",
+      "inputs": [
+        {
+          "name": "order",
+          "type": "tuple",
+          "internalType": "struct OwnableMockFund.Order",
+          "components": [
+            {
+              "name": "mode",
+              "type": "uint8",
+              "internalType": "uint8"
+            },
+            {
+              "name": "owner_",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "receiver",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "input",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "output",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "salt",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint8",
+          "internalType": "uint8"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "stateById",
+      "inputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint8",
+          "internalType": "uint8"
+        }
+      ],
+      "stateMutability": "view"
+    }
+  ],
+  "bytecode": "0x6080604052348015600e575f5ffd5b5060405161057e38038061057e833981016040819052602b916085565b5f80546001600160a01b039485166001600160a01b03199182161790915560018054938516938216939093179092556002805491909316911617905560be565b80516001600160a01b03811681146080575f5ffd5b919050565b5f5f5f606084860312156096575f5ffd5b609d84606b565b925060a960208501606b565b915060b560408501606b565b90509250925092565b6104b3806100cb5f395ff3fe608060405234801561000f575f5ffd5b50600436106100cb575f3560e01c8063660b1657116100885780639c675eaa116100635780639c675eaa1461020b5780639f7a75e71461021d578063a8d5fd6514610242578063dc86496c14610253575f5ffd5b8063660b1657146101d55780638441bf59146101e85780638da5cb5b146101fb575f5ffd5b806313af4035146100cf5780631a6d4c39146101005780631cd64df4146101305780632de948071461016e57806333a3ad8f1461019b57806338d52e0f146101c4575b5f5ffd5b6100fe6100dd366004610325565b5f80546001600160a01b0319166001600160a01b0392909216919091179055565b005b600154610113906001600160a01b031681565b6040516001600160a01b0390911681526020015b60405180910390f35b61015e61013e366004610345565b6001600160a01b03919091165f9081526004602052604090205481161490565b6040519015158152602001610127565b61018d61017c366004610325565b60046020525f908152604090205481565b604051908152602001610127565b6100fe6101a9366004610345565b6001600160a01b039091165f90815260046020526040902055565b6001546001600160a01b0316610113565b6100fe6101e3366004610393565b610275565b600254610113906001600160a01b031681565b5f546001600160a01b0316610113565b5f54610113906001600160a01b031681565b61023061022b3660046103c5565b6102c5565b60405160ff9091168152602001610127565b6002546001600160a01b0316610113565b6102306102613660046103df565b60036020525f908152604090205460ff1681565b5f46308460405160200161028b939291906103f6565b60408051808303601f1901815291815281516020928301205f90815260039092529020805460ff191660ff93909316929092179091555050565b5f5f4630846040516020016102dc939291906103f6565b60408051601f1981840301815291815281516020928301205f908152600390925290205460ff169392505050565b80356001600160a01b0381168114610320575f5ffd5b919050565b5f60208284031215610335575f5ffd5b61033e8261030a565b9392505050565b5f5f60408385031215610356575f5ffd5b61035f8361030a565b946020939093013593505050565b5f60c0828403121561037d575f5ffd5b50919050565b803560ff81168114610320575f5ffd5b5f5f60e083850312156103a4575f5ffd5b6103ae848461036d565b91506103bc60c08401610383565b90509250929050565b5f60c082840312156103d5575f5ffd5b61033e838361036d565b5f602082840312156103ef575f5ffd5b5035919050565b8381526001600160a01b0383166020820152610100810160ff61041884610383565b1660408301526001600160a01b036104326020850161030a565b1660608301526001600160a01b0361044c6040850161030a565b16608083810191909152606084013560a0808501919091529084013560c08401529092013560e0909101529291505056fea264697066735822122053b7a1d7f097222315f4490d71b82758b09687b6a1d7d7b56ceb4bcfe8c7ad1b64736f6c634300081b0033",
+  "deployedBytecode": "0x608060405234801561000f575f5ffd5b50600436106100cb575f3560e01c8063660b1657116100885780639c675eaa116100635780639c675eaa1461020b5780639f7a75e71461021d578063a8d5fd6514610242578063dc86496c14610253575f5ffd5b8063660b1657146101d55780638441bf59146101e85780638da5cb5b146101fb575f5ffd5b806313af4035146100cf5780631a6d4c39146101005780631cd64df4146101305780632de948071461016e57806333a3ad8f1461019b57806338d52e0f146101c4575b5f5ffd5b6100fe6100dd366004610325565b5f80546001600160a01b0319166001600160a01b0392909216919091179055565b005b600154610113906001600160a01b031681565b6040516001600160a01b0390911681526020015b60405180910390f35b61015e61013e366004610345565b6001600160a01b03919091165f9081526004602052604090205481161490565b6040519015158152602001610127565b61018d61017c366004610325565b60046020525f908152604090205481565b604051908152602001610127565b6100fe6101a9366004610345565b6001600160a01b039091165f90815260046020526040902055565b6001546001600160a01b0316610113565b6100fe6101e3366004610393565b610275565b600254610113906001600160a01b031681565b5f546001600160a01b0316610113565b5f54610113906001600160a01b031681565b61023061022b3660046103c5565b6102c5565b60405160ff9091168152602001610127565b6002546001600160a01b0316610113565b6102306102613660046103df565b60036020525f908152604090205460ff1681565b5f46308460405160200161028b939291906103f6565b60408051808303601f1901815291815281516020928301205f90815260039092529020805460ff191660ff93909316929092179091555050565b5f5f4630846040516020016102dc939291906103f6565b60408051601f1981840301815291815281516020928301205f908152600390925290205460ff169392505050565b80356001600160a01b0381168114610320575f5ffd5b919050565b5f60208284031215610335575f5ffd5b61033e8261030a565b9392505050565b5f5f60408385031215610356575f5ffd5b61035f8361030a565b946020939093013593505050565b5f60c0828403121561037d575f5ffd5b50919050565b803560ff81168114610320575f5ffd5b5f5f60e083850312156103a4575f5ffd5b6103ae848461036d565b91506103bc60c08401610383565b90509250929050565b5f60c082840312156103d5575f5ffd5b61033e838361036d565b5f602082840312156103ef575f5ffd5b5035919050565b8381526001600160a01b0383166020820152610100810160ff61041884610383565b1660408301526001600160a01b036104326020850161030a565b1660608301526001600160a01b0361044c6040850161030a565b16608083810191909152606084013560a0808501919091529084013560c08401529092013560e0909101529291505056fea264697066735822122053b7a1d7f097222315f4490d71b82758b09687b6a1d7d7b56ceb4bcfe8c7ad1b64736f6c634300081b0033",
+  "sourceRepo": "local",
+  "sourcePath": "OwnableMockFund.sol",
+  "sourceCommitHash": "04a221b95f791f67fdb0957cdd7dd4acd7ba5e38"
+}

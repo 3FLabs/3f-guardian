@@ -22,18 +22,45 @@ export type RateLimitStore = {
 
 /**
  * Single-process Map-backed store. Suitable for development, single-
- * replica deployments, and unit tests. Never grows without bound: a
- * background sweep removes expired entries on every read after the
- * window resets.
+ * replica deployments, and unit tests.
+ *
+ * Keeps memory bounded by lazily evicting expired windows: every `read`
+ * drops the entry if its window has already closed, and every Nth
+ * `write` opportunistically sweeps expired entries so an idle key set
+ * does not grow without bound when reads never visit them again.
+ *
+ * `now` is injectable for tests; defaults to `Date.now`.
  */
-export function inMemoryRateLimitStore(): RateLimitStore {
+export function inMemoryRateLimitStore(opts?: { now?: () => number }): RateLimitStore {
+  const now = opts?.now ?? Date.now;
   const map = new Map<string, RateLimitState>();
+  // Sweep no more than once per ~256 writes to keep the amortised cost negligible.
+  const SWEEP_PERIOD = 256;
+  let writes = 0;
+
+  const sweep = (nowSec: number) => {
+    for (const [k, v] of map) {
+      if (v.resetUnixSeconds <= nowSec) map.delete(k);
+    }
+  };
+
   return {
     async read(key) {
-      return map.get(key);
+      const entry = map.get(key);
+      if (!entry) return undefined;
+      const nowSec = Math.floor(now() / 1000);
+      if (entry.resetUnixSeconds <= nowSec) {
+        map.delete(key);
+        return undefined;
+      }
+      return entry;
     },
     async write(key, state) {
       map.set(key, state);
+      writes++;
+      if (writes % SWEEP_PERIOD === 0) {
+        sweep(Math.floor(now() / 1000));
+      }
     },
   };
 }

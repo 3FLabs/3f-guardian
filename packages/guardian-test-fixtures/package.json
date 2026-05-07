@@ -1,0 +1,26 @@
+{
+  "name": "@3flabs/guardian-test-fixtures",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Internal test fixtures: prool anvil pool + on-chain Solidity deployments shared by @3flabs/guardian and @3flabs/guardian-defaults integration tests. Never published.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./global-setup": "./src/global-setup.ts",
+    "./artifacts": "./src/artifacts.ts"
+  },
+  "scripts": {
+    "fixtures:extract": "bun run ../../scripts/extract-contract-fixtures.ts",
+    "fixtures:check": "bun run ../../scripts/extract-contract-fixtures.ts --check",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "prool": "^0.2.4",
+    "viem": "^2.48.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.5"
+  },
+  "license": "MIT"
+}

@@ -158,11 +158,11 @@ export function checkNonceWindow(args: {
           `nonce ${nonce} already consumed; submit a different nonce`,
         )
       : passed("nonce has not been consumed by the on-chain whitelist book"),
-    nonce > floor
-      ? passed("nonce is strictly greater than the on-chain nonce floor")
+    nonce >= floor
+      ? passed("nonce is at or above the on-chain nonce floor")
       : failed(
-          "nonce is strictly greater than the on-chain nonce floor",
-          `nonce ${nonce} is not above floor ${floor}`,
+          "nonce is at or above the on-chain nonce floor",
+          `nonce ${nonce} is below floor ${floor}`,
         ),
     nonce <= floor + maxAboveFloor
       ? passed("nonce does not exceed floor + MAX_NONCE_ABOVE_FLOOR")
