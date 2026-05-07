@@ -11,70 +11,133 @@ companion [`@3flabs/guardian-defaults`](https://npmjs.com/package/@3flabs/guardi
 ## Install
 
 ```bash
-bun add @3flabs/guardian
+bun add @3flabs/guardian @3flabs/guardian-defaults viem
 # or
-npm install @3flabs/guardian
+npm install @3flabs/guardian @3flabs/guardian-defaults viem
 ```
 
-Peer runtime: any ESM-compatible Node ≥ 20 / Bun ≥ 1.1.
+Peer runtime: any ESM-compatible Node ≥ 22 / Bun ≥ 1.1.
 
-## Quick start
+## Quickstart — running a signer on a private key
+
+The shortest fully-functional Guardian. Wires a dev private-key signer, an in-memory
+bearer-token directory, viem RPC clients per chain, and the four §A check runners +
+`makeSign*` orchestrators from `@3flabs/guardian-defaults`.
 
 ```ts
+// src/server.ts
 import { Result } from "better-result";
-import { http, createPublicClient, type Hex } from "viem";
+import { http, createPublicClient, type Hex, type PublicClient } from "viem";
 import { mainnet, base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 
 import {
   buildGuardianServer,
-  privateKeyToSignTypedData,
-  makeSignIntentRequestBinding,
+  ENDPOINT_SCOPES,
   makeSignIntentFundBinding,
+  makeSignIntentRequestBinding,
   makeSignIntentSwap,
   makeSignRequestWhitelisting,
+  privateKeyToSignTypedData,
   UnauthenticatedError,
   UnsupportedChainError,
   type GuardianAbstractions,
   type TokenInfo,
 } from "@3flabs/guardian";
+import { pinoLogger } from "@3flabs/guardian-defaults/logger";
+import { inMemoryRateLimiter } from "@3flabs/guardian-defaults/rate-limit";
+import { inMemoryCache } from "@3flabs/guardian-defaults/cache";
 import {
-  buildIntentRequestBindingChecks,
   buildIntentFundBindingChecks,
+  buildIntentRequestBindingChecks,
   buildIntentSwapChecks,
   buildRequestWhitelistingChecks,
+  type A1OnChainData,
+  type IntentFundBindingPolicy,
+  type IntentRequestBindingPolicy,
+  type IntentSwapPolicy,
+  type RequestWhitelistingPolicy,
 } from "@3flabs/guardian-defaults/checks";
-import { inMemoryCache } from "@3flabs/guardian-defaults/cache";
 
-const clients = {
-  1: createPublicClient({ chain: mainnet, transport: http(process.env.RPC_MAINNET) }),
-  8453: createPublicClient({ chain: base, transport: http(process.env.RPC_BASE) }),
-} as const;
-
-const TOKENS = new Map<string, TokenInfo>([
-  // [bearerToken, { tokenId, scopes: new Set([...]), requiresHmac, hmacSecret? }]
-]);
-
+// 1. Signer (dev only — production uses KMS/HSM-backed `SignTypedData`).
 const PRIVATE_KEY = process.env.GUARDIAN_SIGNER_KEY as Hex | undefined;
 if (!PRIVATE_KEY) throw new Error("Missing GUARDIAN_SIGNER_KEY");
 const guardianSigner = privateKeyToAccount(PRIVATE_KEY).address;
 const signTypedData = privateKeyToSignTypedData(PRIVATE_KEY);
 
-// Optional shared cache for ERC-5267 `eip712Domain()` reads (one read
-// amortised across every signing call to that contract).
+// 2. Per-chain viem clients. Cast each to the generic `PublicClient`
+//    so chain-narrowed types (e.g. base's deposit-tx formatter) widen
+//    to the shape `getChainClient` expects.
+const clients: Record<number, PublicClient> = {
+  1: createPublicClient({
+    chain: mainnet,
+    transport: http(process.env.RPC_MAINNET),
+  }) as PublicClient,
+  8453: createPublicClient({
+    chain: base,
+    transport: http(process.env.RPC_BASE),
+  }) as PublicClient,
+};
+const supportedChains = Object.keys(clients).map(Number);
+
+// 3. Bearer-token directory.
+const TOKENS = new Map<string, TokenInfo>([
+  [
+    process.env.DEV_BEARER_TOKEN ?? "dev-token",
+    { tokenId: "dev", scopes: new Set(ENDPOINT_SCOPES), requiresHmac: false },
+  ],
+]);
+
+// 4. Caches: ERC-5267 domain (long TTL) + §A.1/§A.4 on-chain reads (short TTL).
 const eip712DomainCache = inMemoryCache<{ name: string; version: string }>({
   defaultTtlMs: 24 * 60 * 60_000,
+  maxEntries: 256,
+});
+const a1OnChainCache = inMemoryCache<A1OnChainData>({
+  defaultTtlMs: 5 * 60_000,
+  maxEntries: 1024,
 });
 
+// 5. Policies. Empty Sets cause the runner to fail every check —
+//    populate with the factory / owner / puller / consumer / fund /
+//    position-manager addresses your deployment trusts. See the
+//    `@3flabs/guardian-defaults` README for full type docs.
+const requestBindingPolicy: IntentRequestBindingPolicy = {
+  maxDeadlineSecondsAhead: 600,
+  acceptedRequestFactories: new Map([[1, new Set<string>(/* "0xRequestFactory" */)]]),
+  acceptedOwners: new Map([[1, new Set<string>(/* "0xOwner" */)]]),
+  acceptedPullers: new Map([[1, new Set<string>(/* "0xPuller" */)]]),
+  acceptedConsumers: new Map([[1, new Set<string>(/* "0xConsumer" */)]]),
+  eventScanBlockRange: 10_000n,
+  eventScanMaxLookbackBlocks: 1_000_000n,
+};
+const fundBindingPolicy: IntentFundBindingPolicy = {
+  maxDeadlineSecondsAhead: 600,
+  acceptedFunds: new Map([[1, new Set<string>(/* "0xFund" */)]]),
+  acceptedOwners: new Map([[1, new Set<string>(/* "0xOwner" */)]]),
+};
+const swapPolicy: IntentSwapPolicy = {
+  maxDeadlineSecondsAhead: 600,
+  acceptedPmFactories: new Map([[1, new Set<string>(/* "0xPmFactory" */)]]),
+  acceptedPmOwners: new Map([[1, new Set<string>(/* "0xPmOwner" */)]]),
+  swapPriceToleranceBps: 1,
+};
+const whitelistingPolicy: RequestWhitelistingPolicy = {
+  ...requestBindingPolicy,
+  maxNonceAboveFloor: 100n,
+};
+
+// 6. Wire the abstractions and listen.
 const abs: GuardianAbstractions = {
   metadata: {
     build: process.env.BUILD_ID ?? "0.1.0",
     guardianSigner,
-    supportedChains: [1, 8453],
+    supportedChains,
   },
+  logger: pinoLogger({ level: "info", bindings: { service: "guardian" } }),
   liveness: async () => Result.ok(),
   getChainClient: (chainId) => {
-    const client = clients[chainId as keyof typeof clients];
+    const client = clients[chainId];
     return client
       ? Result.ok(client)
       : Result.err(new UnsupportedChainError({ message: "unsupported", chainId }));
@@ -86,27 +149,36 @@ const abs: GuardianAbstractions = {
       : Result.err(new UnauthenticatedError({ message: "Unknown token" }));
   },
   signTypedData,
+  accountRateLimit: inMemoryRateLimiter({ limit: 60, windowSeconds: 60 }),
+
   // Each `makeSign*` factory wires a defaults-package check runner into a
-  // ready-to-use validate-and-sign abstraction: the runner evaluates
-  // Appendix-A on-chain checks, this package fetches the EIP-712 domain
+  // ready-to-use validate-and-sign abstraction: the runner evaluates §A
+  // on-chain checks, this package fetches the EIP-712 domain
   // (`eip712Domain()` per ERC-5267) and signs the matching typed-data.
   signIntentRequestBinding: makeSignIntentRequestBinding({
-    checks: buildIntentRequestBindingChecks({ policy: /* see defaults README */ }),
+    checks: buildIntentRequestBindingChecks({
+      policy: requestBindingPolicy,
+      cache: a1OnChainCache,
+    }),
     guardianSigner,
     cache: eip712DomainCache,
   }),
   signIntentFundBinding: makeSignIntentFundBinding({
-    checks: buildIntentFundBindingChecks({ policy: /* … */ }),
+    checks: buildIntentFundBindingChecks({ policy: fundBindingPolicy }),
     guardianSigner,
     cache: eip712DomainCache,
   }),
   signIntentSwap: makeSignIntentSwap({
-    checks: buildIntentSwapChecks({ policy: /* … */ }),
+    checks: buildIntentSwapChecks({ policy: swapPolicy }),
     guardianSigner,
     cache: eip712DomainCache,
   }),
   signRequestWhitelisting: makeSignRequestWhitelisting({
-    checks: buildRequestWhitelistingChecks({ policy: /* … */, guardianSigner }),
+    checks: buildRequestWhitelistingChecks({
+      policy: whitelistingPolicy,
+      guardianSigner,
+      cache: a1OnChainCache,
+    }),
     guardianSigner,
     cache: eip712DomainCache,
   }),
@@ -118,6 +190,10 @@ buildGuardianServer(abs).listen(3000);
 `buildGuardianServer` returns a vanilla [Elysia](https://elysiajs.com/) instance, so callers
 retain full access to `.listen()`, `.handle()` (for tests), and `.use()` for further
 composition.
+
+For the per-subsystem deep dive (logger options, rate-limiter store interface, cache TTL
+semantics, full policy type tables), see the
+[`@3flabs/guardian-defaults` README](https://npmjs.com/package/@3flabs/guardian-defaults).
 
 ## `GuardianAbstractions` at a glance
 
