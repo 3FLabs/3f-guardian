@@ -42,25 +42,24 @@ describe("on-chain typehashes match the local type strings", () => {
     ).toBe("0x8b4e182587850acdf21dcf7a0f61b2fd7267c2cdf71d4692b57fb97237a29be3");
   });
 
-  it("WhitelistRequest matches the request-whitelist contract's typehash family", () => {
-    // The on-chain `_WHITELIST_TYPEHASH` is computed at deployment as
-    // `keccak256("WhitelistRequest(address[] targets,uint256 deadline,address validator,uint256 nonce)")`.
-    // We don't pin the exact 32-byte digest here (the source declares
-    // it via keccak256 at compile time, not as a hex literal), but we
-    // assert it stays a single keccak256 of the same string used in
-    // `whitelistRequestTypes`. The cross-check below would catch any
-    // accidental member-list drift between the local types and the
-    // contract's type string.
-    const expected = typehash(
-      "WhitelistRequest(address[] targets,uint256 deadline,address validator,uint256 nonce)",
-    );
-    expect(expected).toMatch(/^0x[0-9a-f]{64}$/);
+  // The on-chain `_WHITELIST_TYPEHASH` / `_UNWHITELIST_TYPEHASH` are computed
+  // by `keccak256` over the literal type strings at deployment, not declared
+  // as hex literals in source. Pinning the digests here is the only mechanism
+  // that catches member-list drift between the local types and the contract:
+  // change either side and this assertion flips.
+  it("WhitelistRequest matches the on-chain `_WHITELIST_TYPEHASH`", () => {
+    expect(
+      typehash(
+        "WhitelistRequest(address[] targets,uint256 deadline,address validator,uint256 nonce)",
+      ),
+    ).toBe("0xa8db10babac68d55857fffaeaab73e548d66fb84663570412bbbd6f30f266cc8");
   });
 
-  it("UnwhitelistRequest mirrors WhitelistRequest's member layout", () => {
-    const expected = typehash(
-      "UnwhitelistRequest(address[] targets,uint256 deadline,address validator,uint256 nonce)",
-    );
-    expect(expected).toMatch(/^0x[0-9a-f]{64}$/);
+  it("UnwhitelistRequest matches the on-chain `_UNWHITELIST_TYPEHASH`", () => {
+    expect(
+      typehash(
+        "UnwhitelistRequest(address[] targets,uint256 deadline,address validator,uint256 nonce)",
+      ),
+    ).toBe("0x443ef9facc6714953ad928983b8f4074dba8de482120dc2efbd165f30b96244b");
   });
 });

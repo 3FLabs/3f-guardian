@@ -55,7 +55,8 @@ const TOKENS = new Map<string, TokenInfo>([
   // [bearerToken, { tokenId, scopes: new Set([...]), requiresHmac, hmacSecret? }]
 ]);
 
-const PRIVATE_KEY = process.env.GUARDIAN_SIGNER_KEY as Hex;
+const PRIVATE_KEY = process.env.GUARDIAN_SIGNER_KEY as Hex | undefined;
+if (!PRIVATE_KEY) throw new Error("Missing GUARDIAN_SIGNER_KEY");
 const guardianSigner = privateKeyToAccount(PRIVATE_KEY).address;
 const signTypedData = privateKeyToSignTypedData(PRIVATE_KEY);
 

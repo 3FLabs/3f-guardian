@@ -37,11 +37,18 @@ type SwapParamsTypedData = TypedDataDefinition<typeof swapParamsTypes, "SwapPara
  * legs before signing so `[A, B]` and `[B, A]` produce byte-identical
  * `signature` and `payloadHash`.
  *
- * Canonical order: ascending numeric `intent.id`, ties broken by
- * ascending lower-cased `asset` address. Stable for any two distinct
- * legs (intent ids may repeat in principle, but the `asset` tie-break
- * always disambiguates the two legs in a swap because §A.3 rejects
- * same-asset swaps on the contract side).
+ * Canonical order, applied as a strict comparator chain:
+ *
+ *   1. ascending numeric `intent.id`
+ *   2. ascending lower-cased `asset` address
+ *   3. ascending numeric `amount`
+ *
+ * If all three keys tie the legs are byte-identical, so the order is
+ * irrelevant and we return `[a, b]`. §A.3 rejects same-asset swaps on
+ * the contract side so the (id, asset) tie-break disambiguates in
+ * practice; the `amount` rung guards against a bypass where two legs
+ * share id+asset but differ only by `amount` (whose value lands in
+ * the signed payload as `amount1` / `amount2`).
  *
  * Throws on a `legs.length !== 2` input — the caller is responsible
  * for upstream validation (the §7.5 zod schema enforces it). The throw
@@ -56,7 +63,15 @@ export function canonicaliseSwapLegs(legs: readonly SwapLeg[]): readonly [SwapLe
   const idB = BigInt(b.intent.id);
   if (idA < idB) return [a, b];
   if (idA > idB) return [b, a];
-  return a.asset.toLowerCase() <= b.asset.toLowerCase() ? [a, b] : [b, a];
+  const assetA = a.asset.toLowerCase();
+  const assetB = b.asset.toLowerCase();
+  if (assetA < assetB) return [a, b];
+  if (assetA > assetB) return [b, a];
+  const amountA = BigInt(a.amount);
+  const amountB = BigInt(b.amount);
+  if (amountA < amountB) return [a, b];
+  if (amountA > amountB) return [b, a];
+  return [a, b];
 }
 
 /**

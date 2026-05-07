@@ -33,7 +33,9 @@ type SetRequestParamsTypedData = TypedDataDefinition<
  * Builds the EIP-712 typed-data payload for §7.3
  * `intent-request-bindings`.
  *
- *  - `domain.verifyingContract` MUST equal `body.facility`.
+ *  - `domain.verifyingContract` MUST equal `body.facility`; a mismatch
+ *    throws — signing under the wrong verifier yields a digest the
+ *    on-chain `setRequest` could never accept.
  *  - `body.intent.id` is decimal; viem accepts decimal strings for
  *    `uint256` and converts internally — no manual `BigInt` cast is
  *    required.
@@ -43,6 +45,11 @@ export function buildIntentRequestBindingTypedData(args: {
   body: IntentRequestBindingBody;
 }): GuardianTypedData<typeof setRequestParamsTypes, "SetRequestParams"> {
   const { domain, body } = args;
+  if (domain.verifyingContract.toLowerCase() !== body.facility.toLowerCase()) {
+    throw new Error(
+      "buildIntentRequestBindingTypedData: domain.verifyingContract must equal body.facility",
+    );
+  }
   const typedData: SetRequestParamsTypedData = {
     domain: {
       name: domain.name,

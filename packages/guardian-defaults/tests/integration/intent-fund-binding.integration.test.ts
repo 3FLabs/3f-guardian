@@ -43,12 +43,12 @@ describe("§A.2 intent-fund-binding — on-chain", () => {
 
   it("fails when the fund's owner has been rotated to an unaccepted address", async () => {
     const { book, clients } = fixture.snapshot();
-    // Rotate the OwnableMockFund owner to a rogue EOA
+    // Rotate the OwnableMockFund owner to a rogue EOA. `setOwner` is
+    // unauthenticated by design (see contracts/OwnableMockFund.sol) so any
+    // funded sender works — the deployer wallet client is already wired.
     const rogue = "0x000000000000000000000000000000000000dead" as const;
     const tx = await clients.walletClient.sendTransaction({
-      account: book.accounts.owner.privateKey
-        ? clients.walletClient.account!
-        : clients.walletClient.account!,
+      account: clients.walletClient.account!,
       to: book.mockFund,
       data: encodeFunctionData({
         abi: parseAbi(["function setOwner(address)"]),

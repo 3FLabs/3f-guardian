@@ -28,13 +28,20 @@ type SetFundParamsTypedData = TypedDataDefinition<typeof setFundParamsTypes, "Se
 /**
  * Builds the EIP-712 typed-data payload for §7.4
  * `intent-fund-bindings`. `domain.verifyingContract` MUST equal
- * `body.facility`.
+ * `body.facility`; a mismatch throws — silently signing for the wrong
+ * verifier would yield a digest the on-chain `setFund` could never
+ * accept.
  */
 export function buildIntentFundBindingTypedData(args: {
   domain: Eip712Domain;
   body: IntentFundBindingBody;
 }): GuardianTypedData<typeof setFundParamsTypes, "SetFundParams"> {
   const { domain, body } = args;
+  if (domain.verifyingContract.toLowerCase() !== body.facility.toLowerCase()) {
+    throw new Error(
+      "buildIntentFundBindingTypedData: domain.verifyingContract must equal body.facility",
+    );
+  }
   const typedData: SetFundParamsTypedData = {
     domain: {
       name: domain.name,
