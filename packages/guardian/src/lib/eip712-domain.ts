@@ -125,7 +125,6 @@ export async function fetchEip712DomainNameVersion(args: {
     try {
       await cache.set(key, result, ttlMs !== undefined ? { ttlMs } : undefined);
     } catch (e) {
-      // Best-effort write — never block on a cache failure.
       logger?.warn(
         { err: e instanceof Error ? e.message : String(e), chainId, verifyingContract, key },
         "eip712Domain cache.set threw — value not persisted",

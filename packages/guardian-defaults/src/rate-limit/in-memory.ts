@@ -51,13 +51,10 @@ export type RateLimiterOptions = {
  * write here is not atomic across processes.
  */
 export function inMemoryRateLimiter(options: RateLimiterOptions) {
-  const {
-    limit,
-    windowSeconds,
-    now = Date.now,
-    keyOf = (t: TokenInfo) => t.tokenId,
-    store = inMemoryRateLimitStore(),
-  } = options;
+  const { limit, windowSeconds, now = Date.now, keyOf = (t: TokenInfo) => t.tokenId } = options;
+  // Default store inherits the limiter's clock so test/host-injected
+  // time controls both sides of the read/evict path consistently.
+  const store = options.store ?? inMemoryRateLimitStore({ now });
 
   if (!Number.isFinite(limit) || limit <= 0 || !Number.isInteger(limit)) {
     throw new Error(`inMemoryRateLimiter: limit must be a positive integer, got ${limit}`);

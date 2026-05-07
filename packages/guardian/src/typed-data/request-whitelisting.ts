@@ -67,7 +67,7 @@ type SharedArgs = {
 export function buildWhitelistRequestTypedData(args: SharedArgs): WhitelistRequestTypedData {
   const { domain, body, validator } = args;
   const typedData: WhitelistTypedData = {
-    domain: domainOf(domain),
+    domain,
     types: whitelistRequestTypes,
     primaryType: "WhitelistRequest",
     message: messageOf(body, validator),
@@ -82,7 +82,7 @@ export function buildWhitelistRequestTypedData(args: SharedArgs): WhitelistReque
 export function buildUnwhitelistRequestTypedData(args: SharedArgs): UnwhitelistRequestTypedData {
   const { domain, body, validator } = args;
   const typedData: UnwhitelistTypedData = {
-    domain: domainOf(domain),
+    domain,
     types: unwhitelistRequestTypes,
     primaryType: "UnwhitelistRequest",
     message: messageOf(body, validator),
@@ -106,15 +106,6 @@ export function buildRequestWhitelistingTypedData(args: {
   return operation === "whitelist"
     ? buildWhitelistRequestTypedData({ domain, body: rest, validator })
     : buildUnwhitelistRequestTypedData({ domain, body: rest, validator });
-}
-
-function domainOf(domain: Eip712Domain) {
-  return {
-    name: domain.name,
-    version: domain.version,
-    chainId: domain.chainId,
-    verifyingContract: domain.verifyingContract,
-  };
 }
 
 function messageOf(body: Omit<RequestWhitelistingBody, "operation">, validator: Address) {

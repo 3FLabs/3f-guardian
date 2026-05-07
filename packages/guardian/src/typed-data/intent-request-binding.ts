@@ -51,12 +51,7 @@ export function buildIntentRequestBindingTypedData(args: {
     );
   }
   const typedData: SetRequestParamsTypedData = {
-    domain: {
-      name: domain.name,
-      version: domain.version,
-      chainId: domain.chainId,
-      verifyingContract: domain.verifyingContract,
-    },
+    domain,
     types: setRequestParamsTypes,
     primaryType: "SetRequestParams",
     message: {

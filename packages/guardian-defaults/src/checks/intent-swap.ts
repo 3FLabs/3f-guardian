@@ -10,7 +10,7 @@ import {
 
 import { positionManagerAbi, VIRTUAL_ASSETS } from "../abi/position-manager.js";
 import { positionManagerFactoryAbi } from "../abi/position-manager-factory.js";
-import { checkDeadline, checkMembership, failed, passed, rollUp } from "./helpers.js";
+import { checkDeadline, checkMembership, failed, passed, rollUp, skipped } from "./helpers.js";
 import type { CheckRunner, CheckRunnerError } from "./types.js";
 
 /**
@@ -108,9 +108,9 @@ export function buildIntentSwapChecks(deps: {
           "exactly one leg's asset is a position manager from an accepted factory",
           "no accepted PM factories configured for this chain",
         ),
-        skip("position manager owner is on the accepted-owners list"),
-        skip("non-PM leg's asset equals the position manager's debt asset"),
-        skip("swap legs match the position-manager share price within tolerance"),
+        skipped("position manager owner is on the accepted-owners list"),
+        skipped("non-PM leg's asset equals the position manager's debt asset"),
+        skipped("swap legs match the position-manager share price within tolerance"),
         deadlineCheck,
       ];
       const r = rollUp(all, "Appendix A.3 checks failed");
@@ -152,7 +152,6 @@ export function buildIntentSwapChecks(deps: {
       );
     }
 
-    // Slice: first |factories| results are for legA, next are for legB.
     const aHits = stage1Results
       .slice(0, factoriesArr.length)
       .some((r) => r.status === "success" && r.result === true);
@@ -167,9 +166,9 @@ export function buildIntentSwapChecks(deps: {
         : "neither leg's asset is a position manager from an accepted factory";
       const all: CheckEntry[] = [
         failed("exactly one leg's asset is a position manager from an accepted factory", reason),
-        skip("position manager owner is on the accepted-owners list"),
-        skip("non-PM leg's asset equals the position manager's debt asset"),
-        skip("swap legs match the position-manager share price within tolerance"),
+        skipped("position manager owner is on the accepted-owners list"),
+        skipped("non-PM leg's asset equals the position manager's debt asset"),
+        skipped("swap legs match the position-manager share price within tolerance"),
         deadlineCheck,
       ];
       const r = rollUp(all, "Appendix A.3 checks failed");
@@ -243,7 +242,7 @@ export function buildIntentSwapChecks(deps: {
     // (debt match) failed — the question is moot.
     let priceCheck: CheckEntry;
     if (!debtMatchCheck.passed) {
-      priceCheck = skip("swap legs match the position-manager share price within tolerance");
+      priceCheck = skipped("swap legs match the position-manager share price within tolerance");
     } else {
       const pmShares = BigInt(pmLeg.amount);
       const actualDebt = BigInt(debtLeg.amount);
@@ -279,8 +278,4 @@ export function buildIntentSwapChecks(deps: {
     const r = rollUp(all, "Appendix A.3 checks failed");
     return r.ok ? Result.ok(r.checks) : Result.err(r.error);
   };
-}
-
-function skip(description: string): CheckEntry {
-  return { description, passed: true, skipped: true };
 }

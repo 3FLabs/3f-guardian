@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 
 const EMPTY_BODY = new Uint8Array(0);
+const TEXT_DECODER = new TextDecoder();
 
 /**
  * Per-request store for raw body bytes. Module-level WeakMap rather than
@@ -30,10 +31,10 @@ export const rawBodyPlugin = new Elysia({ name: "guardian:raw-body" })
 
     if (contentType.startsWith("application/json")) {
       if (bytes.byteLength === 0) return {};
-      return JSON.parse(new TextDecoder().decode(bytes));
+      return JSON.parse(TEXT_DECODER.decode(bytes));
     }
     if (contentType.startsWith("text/")) {
-      return new TextDecoder().decode(bytes);
+      return TEXT_DECODER.decode(bytes);
     }
     return bytes;
   })

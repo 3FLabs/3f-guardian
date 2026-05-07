@@ -88,12 +88,7 @@ export function buildIntentSwapTypedData(args: {
   const { domain, body } = args;
   const [first, second] = canonicaliseSwapLegs(body.legs);
   const typedData: SwapParamsTypedData = {
-    domain: {
-      name: domain.name,
-      version: domain.version,
-      chainId: domain.chainId,
-      verifyingContract: domain.verifyingContract,
-    },
+    domain,
     types: swapParamsTypes,
     primaryType: "SwapParams",
     message: {

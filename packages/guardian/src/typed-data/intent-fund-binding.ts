@@ -43,12 +43,7 @@ export function buildIntentFundBindingTypedData(args: {
     );
   }
   const typedData: SetFundParamsTypedData = {
-    domain: {
-      name: domain.name,
-      version: domain.version,
-      chainId: domain.chainId,
-      verifyingContract: domain.verifyingContract,
-    },
+    domain,
     types: setFundParamsTypes,
     primaryType: "SetFundParams",
     message: {

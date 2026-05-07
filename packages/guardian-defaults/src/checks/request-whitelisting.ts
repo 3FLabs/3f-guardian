@@ -10,7 +10,7 @@ import {
 
 import type { AsyncCache } from "../cache/types.js";
 import { whitelistBookAbi } from "../abi/whitelist-book.js";
-import { checkDeadline, checkNonceWindow, rollUp } from "./helpers.js";
+import { checkDeadline, checkNonceWindow, failed, passed, rollUp, skipped } from "./helpers.js";
 import {
   type A1OnChainData,
   type IntentRequestBindingPolicy,
@@ -173,10 +173,15 @@ export function buildRequestWhitelistingChecks(deps: {
  * Appends `(for <addr>)` to a §A.1 entry's description so the §A.4
  * batch result can disambiguate which request contract each entry
  * belongs to. Preserves the `passed` / `skipped` flags and reason.
+ *
+ * The `?? "check failed"` fallback is defensive: by construction every
+ * `passed:false` entry the §A.1 runner emits goes through `failed()`
+ * and carries a reason, but the schema types `reason` as optional, so
+ * we keep a non-empty string to satisfy the wire validator.
  */
 function suffixed(entry: CheckEntry, contract: string): CheckEntry {
   const description = `${entry.description} (for ${contract})`;
-  if (entry.skipped) return { description, passed: true, skipped: true };
-  if (entry.passed) return { description, passed: true, skipped: false };
-  return { description, passed: false, skipped: false, reason: entry.reason ?? "failed" };
+  if (entry.skipped) return skipped(description);
+  if (entry.passed) return passed(description);
+  return failed(description, entry.reason ?? "check failed");
 }
