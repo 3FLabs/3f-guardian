@@ -1,0 +1,319 @@
+{
+  "name": "ERC1967Factory",
+  "abi": [
+    {
+      "type": "function",
+      "name": "adminOf",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "admin",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "changeAdmin",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "admin",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "deploy",
+      "inputs": [
+        {
+          "name": "implementation",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "admin",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "deployAndCall",
+      "inputs": [
+        {
+          "name": "implementation",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "admin",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "data",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "deployDeterministic",
+      "inputs": [
+        {
+          "name": "implementation",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "admin",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "salt",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "deployDeterministicAndCall",
+      "inputs": [
+        {
+          "name": "implementation",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "admin",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "salt",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "data",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "initCodeHash",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "result",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "predictDeterministicAddress",
+      "inputs": [
+        {
+          "name": "salt",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "predicted",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "upgrade",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "implementation",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "upgradeAndCall",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "implementation",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "data",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "event",
+      "name": "AdminChanged",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "admin",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Deployed",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "implementation",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "admin",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Upgraded",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "implementation",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "DeploymentFailed",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "SaltDoesNotStartWithCaller",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "Unauthorized",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "UpgradeFailed",
+      "inputs": []
+    }
+  ],
+  "bytecode": "0x608060405234801561000f575f80fd5b506107968061001d5f395ff3fe6080604052600436106100ad575f3560e01c8063545e7c611161006657806399a88ec41161004c57806399a88ec414610188578063a97b90d51461019b578063db4c545e146101ae575f80fd5b8063545e7c61146101625780639623609d14610175575f80fd5b80633729f922116100965780633729f9221461011d5780634314f120146101305780635414dff014610143575f80fd5b80631acfd02a146100b15780632abbef15146100d2575b5f80fd5b3480156100bc575f80fd5b506100d06100cb3660046105ba565b6101d0565b005b3480156100dd575f80fd5b506100f36100ec3660046105eb565b60601b5490565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020015b60405180910390f35b6100f361012b366004610604565b610218565b6100f361013e366004610682565b61022e565b34801561014e575f80fd5b506100f361015d3660046106df565b610246565b6100f36101703660046105ba565b610275565b6100d0610183366004610682565b610289565b6100d06101963660046105ba565b61032a565b6100f36101a93660046106f6565b61033a565b3480156101b9575f80fd5b506101c2610371565b604051908152602001610114565b338260601b54146101e8576382b429005f526004601cfd5b808260601b5580827f7e644d79422f17c01e4894b5f4f588d331ebfa28653d42ae832dc59e38c9798f5f80a35050565b5f610226848484368561033a565b949350505050565b5f61023d858583808787610389565b95945050505050565b5f80610250610371565b905060ff5f53806035523060601b6001528260155260555f2091505f60355250919050565b5f6102828383368461022e565b9392505050565b338460601b54146102a1576382b429005f526004601cfd5b6040518381527f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc6020820152818360408301375f80836040018334895af16102fd573d6102f5576355299b495f526004601cfd5b3d5f803e3d5ffd5b5082847f5d611f318680d00598bb735d61bacf0c514c6b50e1e5ad30040a4df2b12791c75f80a350505050565b6103368282365f610289565b5050565b5f8360601c33148460601c151761035857632f6348365f526004601cfd5b61036786868660018787610389565b9695505050505050565b5f8061037b610453565b608860139091012092915050565b5f80610393610453565b90508480156103ac57866088601384015ff592506103b7565b6088601383015ff092505b50816103ca5763301164255f526004601cfd5b8781527f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc6020820152828460408301375f80846040018334865af161041b573d6102f55763301164255f526004601cfd5b868260601b558688837fc95935a66d15e0da5e412aca0ad27ae891d20b2fb91cf3994b6a3bf2b81780825f80a4509695505050505050565b6040513060701c80156104f957666052573d6000fd607b8301527f3d356020355560408036111560525736038060403d373d3d355af43d6000803e60748301527f3735a920a3ca505d382bbc545af43d6000803e6052573d6000fd5b3d6000f35b60548301527f14605757363d3d37363d7f360894a13ba1a3210667c828492db98dca3e2076cc60348301523060148301526c607f3d8160093d39f33d3d337382525090565b66604c573d6000fd60758301527f3d3560203555604080361115604c5736038060403d373d3d355af43d6000803e606e8301527f3735a920a3ca505d382bbc545af43d6000803e604c573d6000fd5b3d6000f35b604e8301527f14605157363d3d37363d7f360894a13ba1a3210667c828492db98dca3e2076cc602e83015230600e8301526c60793d8160093d39f33d3d336d82525090565b803573ffffffffffffffffffffffffffffffffffffffff811681146105b5575f80fd5b919050565b5f80604083850312156105cb575f80fd5b6105d483610592565b91506105e260208401610592565b90509250929050565b5f602082840312156105fb575f80fd5b61028282610592565b5f805f60608486031215610616575f80fd5b61061f84610592565b925061062d60208501610592565b9150604084013590509250925092565b5f8083601f84011261064d575f80fd5b50813567ffffffffffffffff811115610664575f80fd5b60208301915083602082850101111561067b575f80fd5b9250929050565b5f805f8060608587031215610695575f80fd5b61069e85610592565b93506106ac60208601610592565b9250604085013567ffffffffffffffff8111156106c7575f80fd5b6106d38782880161063d565b95989497509550505050565b5f602082840312156106ef575f80fd5b5035919050565b5f805f805f6080868803121561070a575f80fd5b61071386610592565b945061072160208701610592565b935060408601359250606086013567ffffffffffffffff811115610743575f80fd5b61074f8882890161063d565b96999598509396509294939250505056fea2646970667358221220157068eeef2ad7e3bf4a0ffecada2dacde6f4d50f79aa0110fd74b3197d0bc7a64736f6c63430008180033",
+  "deployedBytecode": "0x6080604052600436106100ad575f3560e01c8063545e7c611161006657806399a88ec41161004c57806399a88ec414610188578063a97b90d51461019b578063db4c545e146101ae575f80fd5b8063545e7c61146101625780639623609d14610175575f80fd5b80633729f922116100965780633729f9221461011d5780634314f120146101305780635414dff014610143575f80fd5b80631acfd02a146100b15780632abbef15146100d2575b5f80fd5b3480156100bc575f80fd5b506100d06100cb3660046105ba565b6101d0565b005b3480156100dd575f80fd5b506100f36100ec3660046105eb565b60601b5490565b60405173ffffffffffffffffffffffffffffffffffffffff90911681526020015b60405180910390f35b6100f361012b366004610604565b610218565b6100f361013e366004610682565b61022e565b34801561014e575f80fd5b506100f361015d3660046106df565b610246565b6100f36101703660046105ba565b610275565b6100d0610183366004610682565b610289565b6100d06101963660046105ba565b61032a565b6100f36101a93660046106f6565b61033a565b3480156101b9575f80fd5b506101c2610371565b604051908152602001610114565b338260601b54146101e8576382b429005f526004601cfd5b808260601b5580827f7e644d79422f17c01e4894b5f4f588d331ebfa28653d42ae832dc59e38c9798f5f80a35050565b5f610226848484368561033a565b949350505050565b5f61023d858583808787610389565b95945050505050565b5f80610250610371565b905060ff5f53806035523060601b6001528260155260555f2091505f60355250919050565b5f6102828383368461022e565b9392505050565b338460601b54146102a1576382b429005f526004601cfd5b6040518381527f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc6020820152818360408301375f80836040018334895af16102fd573d6102f5576355299b495f526004601cfd5b3d5f803e3d5ffd5b5082847f5d611f318680d00598bb735d61bacf0c514c6b50e1e5ad30040a4df2b12791c75f80a350505050565b6103368282365f610289565b5050565b5f8360601c33148460601c151761035857632f6348365f526004601cfd5b61036786868660018787610389565b9695505050505050565b5f8061037b610453565b608860139091012092915050565b5f80610393610453565b90508480156103ac57866088601384015ff592506103b7565b6088601383015ff092505b50816103ca5763301164255f526004601cfd5b8781527f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc6020820152828460408301375f80846040018334865af161041b573d6102f55763301164255f526004601cfd5b868260601b558688837fc95935a66d15e0da5e412aca0ad27ae891d20b2fb91cf3994b6a3bf2b81780825f80a4509695505050505050565b6040513060701c80156104f957666052573d6000fd607b8301527f3d356020355560408036111560525736038060403d373d3d355af43d6000803e60748301527f3735a920a3ca505d382bbc545af43d6000803e6052573d6000fd5b3d6000f35b60548301527f14605757363d3d37363d7f360894a13ba1a3210667c828492db98dca3e2076cc60348301523060148301526c607f3d8160093d39f33d3d337382525090565b66604c573d6000fd60758301527f3d3560203555604080361115604c5736038060403d373d3d355af43d6000803e606e8301527f3735a920a3ca505d382bbc545af43d6000803e604c573d6000fd5b3d6000f35b604e8301527f14605157363d3d37363d7f360894a13ba1a3210667c828492db98dca3e2076cc602e83015230600e8301526c60793d8160093d39f33d3d336d82525090565b803573ffffffffffffffffffffffffffffffffffffffff811681146105b5575f80fd5b919050565b5f80604083850312156105cb575f80fd5b6105d483610592565b91506105e260208401610592565b90509250929050565b5f602082840312156105fb575f80fd5b61028282610592565b5f805f60608486031215610616575f80fd5b61061f84610592565b925061062d60208501610592565b9150604084013590509250925092565b5f8083601f84011261064d575f80fd5b50813567ffffffffffffffff811115610664575f80fd5b60208301915083602082850101111561067b575f80fd5b9250929050565b5f805f8060608587031215610695575f80fd5b61069e85610592565b93506106ac60208601610592565b9250604085013567ffffffffffffffff8111156106c7575f80fd5b6106d38782880161063d565b95989497509550505050565b5f602082840312156106ef575f80fd5b5035919050565b5f805f805f6080868803121561070a575f80fd5b61071386610592565b945061072160208701610592565b935060408601359250606086013567ffffffffffffffff811115610743575f80fd5b61074f8882890161063d565b96999598509396509294939250505056fea2646970667358221220157068eeef2ad7e3bf4a0ffecada2dacde6f4d50f79aa0110fd74b3197d0bc7a64736f6c63430008180033",
+  "sourceRepo": "whitelist",
+  "sourcePath": "lib/solady/src/utils/ERC1967Factory.sol",
+  "sourceCommitHash": "84033e4e1583535a976d84dca8cd513e3241ce3b"
+}

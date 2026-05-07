@@ -227,6 +227,33 @@ to implement adjacent flows the Guardian doesn't sign for):
 | `ROLE_PULLER` / `ROLE_CONSUMER` | Role bitfield constants used by the §A.1 role-events scan. |
 | `VIRTUAL_ASSETS` | The `1n` constant grunt's `LibView.convertToShares` adds to `totalAssets` (used in the §A.3 share-price math). |
 
+## Running integration tests
+
+The four §A.1–§A.4 check runners are integration-tested against a real on-chain
+deployment. Each vitest worker spins up its own anvil (via [prool](https://github.com/wevm/prool)),
+deploys the Guardian-relevant slice of the 3F protocol (Facility, RequestFactory + a real
+Request, PositionManagerFactory + a real PositionManager, RequestWhitelist proxy,
+`OwnableMockFund`, two MockERC20s, multicall3 at the canonical address), and runs the
+runner against the live state.
+
+- `tests/integration/intent-request-binding.integration.test.ts` — §A.1 happy path,
+  rogue contract (Facility passed where a Request is expected), bad puller list.
+- `tests/integration/intent-fund-binding.integration.test.ts` — §A.2 happy path plus
+  rotated-owner case (`OwnableMockFund.setOwner(…)` mutates the on-chain owner mid-test).
+- `tests/integration/intent-swap.integration.test.ts` — §A.3 with one PM leg + one debt
+  leg priced at the empty-PM share price, neither-leg-PM, bad PM owner.
+- `tests/integration/request-whitelisting.integration.test.ts` — §A.4 whitelist op at
+  `nonce == floor == 0`, unwhitelist op (skips per-contract §A.1), nonce-window violation.
+
+Prerequisite: `anvil` on `PATH`. From the repo root:
+
+```bash
+bun run test:integration
+```
+
+The shared anvil pool, deployment script, and foundry artifacts live in the private
+`@3flabs/guardian-test-fixtures` workspace package and are never published.
+
 ## License
 
 MIT.

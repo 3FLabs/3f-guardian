@@ -209,6 +209,31 @@ Tagged error classes (`UnauthenticatedError`, `ForbiddenError`, `BadRequestError
 are exported so abstraction implementations can construct them directly. The
 `SigningError` and `GuardianError` discriminated unions help typing custom runners.
 
+## Running integration tests
+
+The package ships an integration suite that boots a real anvil per vitest worker (via
+[prool](https://github.com/wevm/prool)), deploys the Guardian-relevant slice of the 3F
+protocol, and exercises the four `makeSign*` orchestrators end-to-end:
+
+- `tests/integration/eip712-domain.integration.test.ts` — verifies
+  `fetchEip712DomainNameVersion` reads `{ name: "3F", version: "1" }` from the deployed
+  Facility and `{ name: "3fRequestWhitelist", version: "1" }` from the RequestWhitelist
+  proxy, plus cache amortisation.
+- `tests/integration/sign-runners.integration.test.ts` — proves each `makeSign*` produces
+  signatures that recover to the configured signer. The `makeSignIntentRequestBinding`
+  case additionally submits the signature on-chain via `Facility.setRequest(…)` from a
+  facilitator-roled account and asserts the receipt is `success` — which verifies the
+  contract accepts the off-chain digest.
+
+Prerequisite: `anvil` on `PATH`. From the repo root:
+
+```bash
+bun run test:integration
+```
+
+The shared anvil pool, deployment script, and foundry artifacts live in the private
+`@3flabs/guardian-test-fixtures` workspace package and are never published.
+
 ## License
 
 MIT.

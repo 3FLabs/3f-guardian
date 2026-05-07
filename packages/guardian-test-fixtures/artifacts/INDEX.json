@@ -1,0 +1,62 @@
+[
+  {
+    "name": "Facility",
+    "sourceRepo": "grunt",
+    "sourcePath": "src/facility/Facility.sol",
+    "sourceCommitHash": "57dbb092467841e58a802db92c76565a72e4e578"
+  },
+  {
+    "name": "IntentDescriptor",
+    "sourceRepo": "grunt",
+    "sourcePath": "src/facility/IntentDescriptor.sol",
+    "sourceCommitHash": "57dbb092467841e58a802db92c76565a72e4e578"
+  },
+  {
+    "name": "TransferGuard",
+    "sourceRepo": "grunt",
+    "sourcePath": "src/guard/TransferGuard.sol",
+    "sourceCommitHash": "57dbb092467841e58a802db92c76565a72e4e578"
+  },
+  {
+    "name": "PositionManagerFactory",
+    "sourceRepo": "grunt",
+    "sourcePath": "src/manager/PositionManagerFactory.sol",
+    "sourceCommitHash": "57dbb092467841e58a802db92c76565a72e4e578"
+  },
+  {
+    "name": "RequestFactory",
+    "sourceRepo": "grunt",
+    "sourcePath": "src/request/RequestFactory.sol",
+    "sourceCommitHash": "57dbb092467841e58a802db92c76565a72e4e578"
+  },
+  {
+    "name": "MockERC20",
+    "sourceRepo": "grunt",
+    "sourcePath": "test/mock/MockERC20.sol",
+    "sourceCommitHash": "57dbb092467841e58a802db92c76565a72e4e578"
+  },
+  {
+    "name": "RequestWhitelist",
+    "sourceRepo": "whitelist",
+    "sourcePath": "src/RequestWhitelist.sol",
+    "sourceCommitHash": "84033e4e1583535a976d84dca8cd513e3241ce3b"
+  },
+  {
+    "name": "ERC1967Factory",
+    "sourceRepo": "whitelist",
+    "sourcePath": "lib/solady/src/utils/ERC1967Factory.sol",
+    "sourceCommitHash": "84033e4e1583535a976d84dca8cd513e3241ce3b"
+  },
+  {
+    "name": "OwnableMockFund",
+    "sourceRepo": "local",
+    "sourcePath": "OwnableMockFund.sol",
+    "sourceCommitHash": "b8bfeeb84c430c70807d4aad39d52b5f2b2d7324"
+  },
+  {
+    "name": "Multicall3",
+    "sourceRepo": "local",
+    "sourcePath": "Multicall3.sol",
+    "sourceCommitHash": "b8bfeeb84c430c70807d4aad39d52b5f2b2d7324"
+  }
+]
