@@ -1,6 +1,6 @@
 {
   "name": "@3flabs/guardian",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "HTTP shell for the Guardian off-chain signer service. Hosts plug in policy & signing via a typed abstractions contract.",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,11 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "src", "README.md"],
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
