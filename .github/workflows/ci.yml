@@ -2,8 +2,10 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  # Invoked from release.yml as the gate that must pass before changesets/action runs.
+  # We deliberately don't trigger on `push: branches[main]` here — release.yml owns the
+  # main-push pipeline and would otherwise duplicate the run.
+  workflow_call:
 
 jobs:
   verify:
