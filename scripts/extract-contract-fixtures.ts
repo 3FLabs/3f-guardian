@@ -158,7 +158,11 @@ function writeIndex(stamps: readonly StampedArtifact[]) {
 }
 
 function run(checkOnly: boolean) {
-  buildLocalIfNeeded();
+  // `--check` mode is read-only: never invoke `forge build` or mutate the
+  // local `out/` tree. Verification must be deterministic and runnable in
+  // CI environments without Foundry installed (the bundled artifacts are
+  // the source of truth there).
+  if (!checkOnly) buildLocalIfNeeded();
 
   const stamped = SOURCES.map(stamp);
 
@@ -171,12 +175,18 @@ function run(checkOnly: boolean) {
         drift++;
         continue;
       }
-      if (existing.bytecode !== s.bytecode || existing.sourceCommitHash !== s.sourceCommitHash) {
+      const abiMatch = JSON.stringify(existing.abi) === JSON.stringify(s.abi);
+      const bytecodeMatch = existing.bytecode === s.bytecode;
+      const deployedMatch = existing.deployedBytecode === s.deployedBytecode;
+      const commitMatch = existing.sourceCommitHash === s.sourceCommitHash;
+      if (!abiMatch || !bytecodeMatch || !deployedMatch || !commitMatch) {
         console.error(
           `[fixtures] DRIFT: ${s.name}\n` +
             `  bundled commit:  ${existing.sourceCommitHash}\n` +
             `  current commit:  ${s.sourceCommitHash}\n` +
-            `  bytecode match:  ${existing.bytecode === s.bytecode}\n` +
+            `  abi match:       ${abiMatch}\n` +
+            `  bytecode match:  ${bytecodeMatch}\n` +
+            `  runtime match:   ${deployedMatch}\n` +
             `  Run \`bun run fixtures:extract\` to refresh.`,
         );
         drift++;

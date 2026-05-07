@@ -14,10 +14,15 @@
  *        contract uses the same domain + typehash (we read both from
  *        the contract), it would accept this signature too.
  *      - On-chain (where viable): submit the signature to the verifying
- *        view (e.g. `Facility.setRequest`). We don't require success —
- *        many of those calls fail on *non-signature* preconditions
- *        (asset match, intent state, …); we only assert the call does
- *        NOT revert with `NotGuardian` or `BadSignature`.
+ *        view (e.g. `Facility.setRequest`). The deployment in
+ *        `@3flabs/guardian-test-fixtures` populates every non-signature
+ *        precondition (intent id 1 exists, facilitator has the role,
+ *        request is freshly minted, deadline is in the future), so we
+ *        assert the receipt status is `"success"`. The catch arm is
+ *        defensive: if the call ever does revert, we additionally fail
+ *        loudly when the message matches `NotGuardian` /
+ *        `InvalidSignature` / `BadSignature` so a signature regression
+ *        can never masquerade as a non-signature failure.
  */
 
 import { Result } from "better-result";
