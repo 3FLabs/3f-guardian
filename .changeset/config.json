@@ -7,5 +7,5 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["@3flabs/guardian-monorepo"]
+  "ignore": []
 }
