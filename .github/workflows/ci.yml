@@ -19,6 +19,16 @@ jobs:
         with:
           bun-version: latest
 
+      # vitest 4 spawns Node child workers (its `forks` pool, used by
+      # the integration config) and prool 0.2.4 calls
+      # `Promise.withResolvers` — added in Node 22 — when booting an
+      # anvil instance. The runner's default Node is older, so install
+      # an explicit modern version. Aligned with `release.yml`.
+      - name: Setup Node.js (for vitest workers)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       # `anvil` is required by the prool-backed integration suite (one
       # instance per vitest worker, multiplexed via path-routed URLs in
       # `@3flabs/guardian-test-fixtures`). The toolchain action puts
