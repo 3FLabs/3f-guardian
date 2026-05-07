@@ -62,6 +62,14 @@ jobs:
           # id-token:write and uses the npm trusted-publisher flow — no
           # NPM_TOKEN secret required if the package is configured as an
           # OIDC trusted publisher on npmjs.com.
-          publish: bunx changeset publish
+          #
+          # The rewrite step replaces `workspace:*` specifiers in
+          # packages/*/package.json with the real semver range — `npm publish`
+          # does not understand the `workspace:` protocol, so without this
+          # the published manifests would contain `"workspace:*"` literally
+          # and be uninstallable. The rewrite is intentionally inlined here
+          # (not a separate workflow step) so it only runs in the publish
+          # phase, never in the version phase that opens the Version PR.
+          publish: bun run scripts/rewrite-workspace-deps.ts && bunx changeset publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
