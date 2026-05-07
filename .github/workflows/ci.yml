@@ -9,7 +9,7 @@ on:
 
 jobs:
   verify:
-    name: build + lint + typecheck + test
+    name: build + lint + typecheck + test + integration
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,6 +18,17 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      # `anvil` is required by the prool-backed integration suite (one
+      # instance per vitest worker, multiplexed via path-routed URLs in
+      # `@3flabs/guardian-test-fixtures`). The toolchain action puts
+      # `anvil` / `forge` / `cast` on `PATH`; we don't run `forge build`
+      # here because all foundry artifacts are bundled in
+      # `packages/guardian-test-fixtures/artifacts/`.
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
 
       - name: Install
         run: bun install --frozen-lockfile
@@ -39,3 +50,11 @@ jobs:
 
       - name: Test
         run: bun run test
+
+      # Integration: boots a real anvil per vitest worker, deploys the
+      # full Guardian stack (Facility, RequestFactory, RequestWhitelist
+      # behind ERC-1967, OwnableMockFund, …), and exercises the §A
+      # check runners + `makeSign*` orchestrators end-to-end. Bundled
+      # artifacts mean no `forge build` is needed on the runner.
+      - name: Integration test
+        run: bun run test:integration
