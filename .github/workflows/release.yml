@@ -34,18 +34,17 @@ jobs:
 
       # OIDC trusted-publisher flow needs npm ≥ 11.5 — that version is
       # the first to authenticate to npm using the GitHub OIDC token
-      # rather than an `NPM_TOKEN` secret. We pin Node 22 (bundles npm
-      # 10) and upgrade npm explicitly. `bun publish` does not yet
-      # support provenance, so the actual publish step is `npm publish`
-      # under the hood (driven by `changeset publish`).
+      # rather than an `NPM_TOKEN` secret. Node 24 ships npm 11+ out
+      # of the box, so no explicit upgrade is required (the in-place
+      # `npm install -g npm@latest` from npm 10 is buggy on hosted
+      # runners). `bun publish` does not yet support provenance, so the
+      # actual publish step is `npm publish` under the hood (driven by
+      # `changeset publish`).
       - name: Setup Node.js (for npm publish)
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: "https://registry.npmjs.org"
-
-      - name: Upgrade npm to ≥ 11.5 (OIDC trusted publisher)
-        run: npm install -g npm@latest
 
       - name: Install
         run: bun install --frozen-lockfile
