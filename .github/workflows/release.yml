@@ -18,7 +18,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Run the full CI suite (build + lint + format + typecheck + test) before doing
+  # anything releasey. `release` blocks on this via `needs: verify`, so a red test
+  # never reaches changesets/action — neither the version PR nor the publish step.
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: verify
     name: changesets version + publish
     runs-on: ubuntu-latest
     steps:

@@ -2,17 +2,23 @@
 
 Default building blocks for [`@3flabs/guardian`](https://npmjs.com/package/@3flabs/guardian) hosts.
 
-Three subsystems, each independently usable:
+Four subsystems, each independently usable via a dedicated subpath export so tree-shaking
+stays effective:
 
-- **Logger** — pino + pino-pretty backed structured logger.
-- **Rate limiter** — single-process fixed-window in-memory counter, pluggable store.
-- **Checks** — Appendix-A check-runner builders for the four signing endpoints. Adapter ports
-  for protocol-specific contract reads keep the package ABI-agnostic.
+- **Logger** (`/logger`) — pino + pino-pretty backed structured logger.
+- **Rate limiter** (`/rate-limit`) — single-process fixed-window in-memory counter with a pluggable store.
+- **Cache** (`/cache`) — generic `AsyncCache<V>` interface plus an in-memory implementation, used by §A.1 / §A.4 to amortise on-chain reads.
+- **Checks** (`/checks`) — Appendix-A check-runner builders for the four signing endpoints, plus the on-chain ABIs they read.
+
+The package depends on `@3flabs/guardian` for its types (`Logger`, `TokenInfo`, `RateLimitWindow`,
+`SigningContext`, error classes, body schemas) and on `viem` for the on-chain reads.
 
 ## Install
 
 ```bash
 bun add @3flabs/guardian @3flabs/guardian-defaults
+# or
+npm install @3flabs/guardian @3flabs/guardian-defaults
 ```
 
 ## Logger
@@ -29,9 +35,16 @@ const logger = pinoLogger({
 const abs: GuardianAbstractions = { ...rest, logger };
 ```
 
-`pretty` auto-disables when stdout is not a TTY (production deployments get NDJSON).
-A conservative `redact` list masks `Authorization`, `X-Guardian-Signature`, and `hmacSecret`
-fields if they appear in the structured payload.
+`PinoLoggerOptions`:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `level` | `"trace" \| "debug" \| "info" \| "warn" \| "error" \| "fatal"` | `LOG_LEVEL` env, else `"info"` | |
+| `pretty` | `boolean` | auto: `process.stdout.isTTY` | When `false`, emits NDJSON for log shippers. |
+| `bindings` | `Record<string, unknown>` | — | Top-level fields stamped onto every record. |
+| `redact` | `readonly string[]` | conservative defaults | Pino redact paths. The default list masks `Authorization`, `X-Guardian-Signature`, `X-Guardian-Timestamp`, and any field literally named `hmacSecret` / `secret`. |
+
+The returned value is a `pino.Logger` cast to the Guardian `Logger` contract.
 
 ## Rate limiter
 
@@ -46,33 +59,78 @@ const accountRateLimit = inMemoryRateLimiter({
 const abs: GuardianAbstractions = { ...rest, accountRateLimit };
 ```
 
-Single-process by default. For multi-replica deployments, supply your own `store: RateLimitStore`
-backed by a transactional primitive (Redis `INCR + EXPIRE`, Cloudflare Durable Object).
+`RateLimiterOptions`:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `limit` | `number` | required | Requests permitted per window. Must be a positive integer. |
+| `windowSeconds` | `number` | required | Width of the fixed window. Must be > 0. |
+| `now` | `() => number` | `Date.now` | Clock injection for tests. |
+| `keyOf` | `(token: TokenInfo) => string` | `(t) => t.tokenId` | Extract the rate-limit key. |
+| `store` | `RateLimitStore` | `inMemoryRateLimitStore()` | Pluggable storage. |
+
+For multi-replica deployments, supply your own `RateLimitStore` backed by a transactional
+primitive (Redis `INCR + EXPIRE`, Cloudflare Durable Object). The single-process Map-based
+default is not atomic across processes.
+
+## Cache
+
+```ts
+import { inMemoryCache } from "@3flabs/guardian-defaults/cache";
+import type { AsyncCache } from "@3flabs/guardian-defaults/cache";
+import type { A1OnChainData } from "@3flabs/guardian-defaults/checks";
+
+const cache: AsyncCache<A1OnChainData> = inMemoryCache({
+  defaultTtlMs: 5 * 60_000,
+  maxEntries: 1000,
+});
+```
+
+`InMemoryCacheOptions`:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `defaultTtlMs` | `number` | unset | Applied when `set` is called without `ttlMs`. If omitted, entries live forever (until evicted by `maxEntries`). |
+| `maxEntries` | `number` | `0` (unbounded) | Soft LRU bound. On overflow: sweep expired, then trim oldest insertion-ordered entries. |
+| `now` | `() => number` | `Date.now` | Clock injection for tests. |
+
+`AsyncCache<V>` is a 3-method interface (`get`, `set`, `delete`). Implementations are free
+to back it with Redis / Memcached / KV; transport-backed adapters MUST handle their own
+serialisation (the in-memory cache stores by reference and side-steps serialisation entirely).
+
+The §A.1 and §A.4 check builders accept an optional `cache` to amortise the
+multicall + role-events scan across requests targeting the same request contract.
 
 ## Checks
 
-Each builder evaluates the corresponding Appendix-A checks and returns
-`Result<CheckEntry[], ValidationFailedError | UpstreamUnavailableError | …>`.
+Each builder evaluates the corresponding Appendix-A checks and returns a
+`CheckRunner<Body, NeedsConflict>` — an async function taking `(SigningContext, Body)` and
+yielding `Result<readonly CheckEntry[], CheckRunnerError<NeedsConflict>>`. On a green run
+the entries are returned `Ok`; otherwise the error union is `ValidationFailedError | UpstreamUnavailableError`
+(plus `StateConflictError` for §A.2).
 
-Hosts compose this with their own typed-data builder & call `ctx.signTypedData` after a
-green run:
+Hosts compose this with their own typed-data builder and call `ctx.signTypedData` after a
+green run. Example for §A.3:
 
 ```ts
 import {
   buildIntentSwapChecks,
-  acceptedSwapPair,
   type IntentSwapPolicy,
-  type SwapPriceOracle,
 } from "@3flabs/guardian-defaults/checks";
+import type { SignIntentSwap } from "@3flabs/guardian";
 
-const checks = buildIntentSwapChecks({
-  policy: {
-    maxDeadlineSecondsAhead: 600,
-    swapPriceToleranceBps: 5,
-    acceptedSwapPairs: new Map([[1, new Set([acceptedSwapPair(USDC, WETH)])]]),
-  },
-  oracle: { readReferencePriceWad: async (ctx, { assetA, assetB }) => /* WAD */ },
-});
+const policy: IntentSwapPolicy = {
+  maxDeadlineSecondsAhead: 600,
+  swapPriceToleranceBps: 1,
+  acceptedPmFactories: new Map([
+    [1, new Set(["0xPositionManagerFactoryAddress"])],
+  ]),
+  acceptedPmOwners: new Map([
+    [1, new Set(["0xAcceptedOwnerAddress"])],
+  ]),
+};
+
+const checks = buildIntentSwapChecks({ policy });
 
 const signIntentSwap: SignIntentSwap = async (ctx, body) => {
   const r = await checks(ctx, body);
@@ -81,18 +139,85 @@ const signIntentSwap: SignIntentSwap = async (ctx, body) => {
 };
 ```
 
-The four builders:
+Note: the runner reads the on-chain state itself via `ctx.client` and the bundled ABIs
+(see [ABIs](#abis) below). There is **no** oracle adapter port — the package is
+viem-driven, not ABI-agnostic.
 
-| Endpoint | Builder | Adapter ports |
+### The four builders
+
+| Endpoint | Builder | `deps` |
 |---|---|---|
-| `intent-request-bindings` (§A.1) | `buildIntentRequestBindingChecks` | `RequestContractReader` |
-| `intent-fund-bindings` (§A.2)    | `buildIntentFundBindingChecks`    | `FundContractReader` |
-| `intent-swaps` (§A.3)            | `buildIntentSwapChecks`           | `SwapPriceOracle` |
-| `request-whitelistings` (§A.4)   | `buildRequestWhitelistingChecks`  | `RequestContractReader`, `WhitelistBookReader` |
+| `intent-request-bindings` (§A.1) | `buildIntentRequestBindingChecks` | `{ policy: IntentRequestBindingPolicy, cache?, cacheTtlMs? }` |
+| `intent-fund-bindings` (§A.2)    | `buildIntentFundBindingChecks`    | `{ policy: IntentFundBindingPolicy }` |
+| `intent-swaps` (§A.3)            | `buildIntentSwapChecks`           | `{ policy: IntentSwapPolicy }` |
+| `request-whitelistings` (§A.4)   | `buildRequestWhitelistingChecks`  | `{ policy: RequestWhitelistingPolicy, guardianSigner: Address, cache?, cacheTtlMs? }` |
 
 `buildIntentFundBindingChecks` is the only runner whose error union includes
-`StateConflictError` (§A.2 fund-state is the only 409-class check in v1). Per §6.6.1,
-it returns `ValidationFailedError` over `StateConflictError` when both classes fail.
+`StateConflictError` — the §A.2 fund-state check is the only 409-class check in v1. Per
+§6.6.1 it returns `ValidationFailedError` over `StateConflictError` when both classes fail.
+
+### Policy shapes
+
+Every policy keys per-chain accepted sets by EIP-155 chain id; address comparisons are
+case-insensitive.
+
+```ts
+type IntentRequestBindingPolicy = {
+  maxDeadlineSecondsAhead: number;
+  acceptedRequestFactories: ReadonlyMap<number, ReadonlySet<string>>;
+  acceptedOwners:           ReadonlyMap<number, ReadonlySet<string>>;
+  acceptedPullers:          ReadonlyMap<number, ReadonlySet<string>>;
+  acceptedConsumers:        ReadonlyMap<number, ReadonlySet<string>>;
+  eventScanBlockRange:        bigint;  // chunk size for getLogs
+  eventScanMaxLookbackBlocks: bigint;  // give-up horizon
+};
+
+type IntentFundBindingPolicy = {
+  maxDeadlineSecondsAhead: number;
+  acceptedFunds:  ReadonlyMap<number, ReadonlySet<string>>;
+  acceptedOwners: ReadonlyMap<number, ReadonlySet<string>>;
+};
+
+type IntentSwapPolicy = {
+  maxDeadlineSecondsAhead: number;
+  acceptedPmFactories: ReadonlyMap<number, ReadonlySet<string>>;
+  acceptedPmOwners:    ReadonlyMap<number, ReadonlySet<string>>;
+  swapPriceToleranceBps: number;       // 1 absorbs the ~1 wei mulDiv rounding
+};
+
+type RequestWhitelistingPolicy = IntentRequestBindingPolicy & {
+  maxNonceAboveFloor: bigint;          // per-validator nonce window in the whitelist book
+};
+```
+
+### Helpers
+
+- `failed(description, reason)` / `passed(description)` / `skipped(description)` — `CheckEntry`
+  builders. Re-exported from `@3flabs/guardian` so hosts writing their own runners get
+  the same shape.
+- `checkDeadline`, `checkMembership`, `checkNonceWindow`, `checkSwapPriceTolerance`,
+  `rollUp` — primitives the bundled runners are built from. Useful when assembling
+  custom check arrays.
+
+## ABIs
+
+The on-chain reads happen against bundled ABIs and constants, exported from the package
+root for hosts that want to issue their own contract calls (e.g., to enrich responses or
+to implement adjacent flows the Guardian doesn't sign for):
+
+| Export | What it is |
+|---|---|
+| `facilityAbi` | Facility contract — `getIntent(id)` for §A.2. |
+| `fundAbi` | Fund contract — `Ownable.owner()` plus role / order-state views. |
+| `requestAbi` | Request contract — `Ownable.owner()` plus the `RolesUpdated` event scanned in §A.1. |
+| `requestFactoryAbi` | Request factory — `isRequest(addr)` for §A.1, `RequestCreated` event for the deployment-block lookup. |
+| `positionManagerAbi` | Position manager — `owner / assets / pendingFees / virtualShareOffset` for §A.3. |
+| `positionManagerFactoryAbi` | Position-manager factory — `isPositionManager(addr)` for §A.3. |
+| `whitelistBookAbi` | Whitelist book — `validatorNonceFloor` and `isNonceConsumed` for §A.4. |
+| `ORDER_STATE` / `ORDER_STATE_NAME` / `OrderState` | Numeric enum + reverse map for `IFund.state(Order)`. |
+| `DEPOSITOR_ROLE` | `keccak256("DEPOSITOR_ROLE")` constant referenced by §A.2. |
+| `ROLE_PULLER` / `ROLE_CONSUMER` | Role bitfield constants used by the §A.1 role-events scan. |
+| `VIRTUAL_ASSETS` | The `1n` constant grunt's `LibView.convertToShares` adds to `totalAssets` (used in the §A.3 share-price math). |
 
 ## License
 

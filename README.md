@@ -78,6 +78,8 @@ packages/
     ├─ src/
     │   ├─ logger/pino.ts           pinoLogger() — pino + pino-pretty
     │   ├─ rate-limit/in-memory.ts  inMemoryRateLimiter() with pluggable Store
+    │   ├─ cache/                   AsyncCache<V> + inMemoryCache (used by §A.1 / §A.4)
+    │   ├─ abi/                     bundled on-chain ABIs and role/state constants
     │   └─ checks/                  buildIntent{Request,Fund,Swap,Whitelisting}Checks
     └─ tests/
 ```
