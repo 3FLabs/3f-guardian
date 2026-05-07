@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 
 import type { GuardianAbstractions } from "../abstractions.js";
 import { zHealthResponse } from "../schemas/health.js";
+import { errorResponses } from "../schemas/responses.js";
 import { unwrapOrThrow } from "../lib/result.js";
 
 /**
@@ -18,13 +19,16 @@ export function healthRoute(abs: GuardianAbstractions) {
       return { status: "ok" } as const;
     },
     {
-      response: { 200: zHealthResponse },
+      response: { 200: zHealthResponse, 503: errorResponses[503] },
       detail: {
         tags: ["meta"],
         summary: "Liveness probe (§7.1)",
         description:
           "Returns 200 iff the Guardian is prepared to accept authenticated " +
-          "requests; 503 otherwise.",
+          "requests; 503 otherwise. Unauthenticated.",
+        // Override the document-level bearerAuth requirement: /health is
+        // unauthenticated per §7.1.
+        security: [],
       },
     },
   );

@@ -2,7 +2,7 @@ import { Elysia } from "elysia";
 
 import type { GuardianAbstractions } from "../abstractions.js";
 import { runSigning } from "../lib/signing.js";
-import { zErrorEnvelope } from "../schemas/responses.js";
+import { pickErrorResponses } from "../schemas/responses.js";
 import {
   zRequestWhitelistingBody,
   zRequestWhitelistingResponse,
@@ -34,18 +34,12 @@ export function requestWhitelistingRoute(abs: GuardianAbstractions) {
           logger,
         }),
       {
+        // Documentation-only — see comment on intent-request-binding route.
+        parse: "json",
         body: zRequestWhitelistingBody,
         response: {
           200: zRequestWhitelistingResponse,
-          400: zErrorEnvelope,
-          401: zErrorEnvelope,
-          403: zErrorEnvelope,
-          404: zErrorEnvelope,
-          422: zErrorEnvelope,
-          429: zErrorEnvelope,
-          500: zErrorEnvelope,
-          502: zErrorEnvelope,
-          503: zErrorEnvelope,
+          ...pickErrorResponses([400, 401, 403, 404, 422, 429, 500, 502, 503]),
         },
         detail: {
           tags: ["whitelist-book"],

@@ -1,5 +1,6 @@
 import { Elysia } from "elysia";
 import { openapi } from "@elysiajs/openapi";
+import { z } from "zod";
 
 import type { GuardianAbstractions } from "./abstractions.js";
 
@@ -37,6 +38,20 @@ export function buildGuardianServer(abs: GuardianAbstractions) {
     .use(
       openapi({
         path: "/openapi",
+        // Without this, zod schemas attached via `body` / `response` are not
+        // converted to JSON Schema and request bodies / 200 responses render
+        // empty in the OpenAPI document. Zod v4 ships `toJSONSchema` natively.
+        //
+        // `io: "input"` documents the wire format (e.g. `zAddress`'s
+        // `regex(...).transform(v => v.toLowerCase())` becomes
+        // `{ type: "string", pattern: "^0x[0-9a-fA-F]{40}$" }` instead of
+        // collapsing to `{}`); `unrepresentable: "any"` keeps unrepresentable
+        // shapes (transforms, branded types) from throwing and replaces them
+        // with `{}` instead of erasing the whole schema.
+        mapJsonSchema: {
+          zod: (schema: z.ZodType) =>
+            z.toJSONSchema(schema, { io: "input", unrepresentable: "any" }),
+        },
         documentation: {
           info: {
             title: "Guardian Service HTTP API",
@@ -53,6 +68,23 @@ export function buildGuardianServer(abs: GuardianAbstractions) {
               description: "Whitelist book actions (§7.6).",
             },
           ],
+          components: {
+            securitySchemes: {
+              bearerAuth: {
+                type: "http",
+                scheme: "bearer",
+                description:
+                  "Per-token bearer authentication (§5.1). Required for every " +
+                  "/v1/* endpoint. Tokens flagged as HMAC-required additionally " +
+                  "MUST be accompanied by `X-Guardian-Timestamp` and " +
+                  "`X-Guardian-Signature` headers (§5.4).",
+              },
+            },
+          },
+          // Document-level default: every operation requires bearerAuth unless
+          // it explicitly overrides with `security: []` (the unauthenticated
+          // /health and /version endpoints do exactly that).
+          security: [{ bearerAuth: [] }],
         },
       }),
     )

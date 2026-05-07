@@ -20,6 +20,11 @@ export function versionRoute(abs: GuardianAbstractions) {
       detail: {
         tags: ["meta"],
         summary: "Build and protocol metadata (§7.2)",
+        description:
+          "Build identifier, signing-key address, and supported chains. Unauthenticated.",
+        // Override the document-level bearerAuth requirement: /version is
+        // unauthenticated per §7.2.
+        security: [],
       },
     },
   );
