@@ -8,6 +8,8 @@ import {
   type SigningContext,
 } from "@3flabs/guardian";
 
+import { inMemoryCache } from "../src/cache/in-memory.js";
+import type { A1OnChainData } from "../src/checks/intent-request-binding.js";
 import {
   buildRequestWhitelistingChecks,
   type RequestWhitelistingPolicy,
@@ -390,5 +392,50 @@ describe("buildRequestWhitelistingChecks", () => {
         ),
       ).toBe(true);
     }
+  });
+
+  it("shared cache amortises §A.1 across whitelist batches that re-use a contract", async () => {
+    const stub = makeClient({
+      multicallResponses: [
+        // First whitelist call: RC1 stage-1 + book.
+        [OWNER, true],
+        [10n, false],
+        // Second whitelist call: book only — RC1 served from cache.
+        [10n, false],
+      ],
+      getLogs: () => happyEvents(RC1),
+      latestBlock: 5_500n,
+    });
+    const cache = inMemoryCache<A1OnChainData>();
+    const run = buildRequestWhitelistingChecks({
+      policy,
+      guardianSigner: GUARDIAN,
+      cache,
+    });
+
+    const r1 = await run(ctx(stub.client), {
+      chainId: 1,
+      whitelistBook: BOOK,
+      operation: "whitelist",
+      requestContracts: [RC1],
+      nonce: "100",
+      deadline: 1_700_000_500,
+    });
+    expect(r1.isOk()).toBe(true);
+    expect(stub.multicalls.length).toBe(2); // RC1 + book
+    expect(stub.getLogsCalls).toBe(1);
+
+    const r2 = await run(ctx(stub.client), {
+      chainId: 1,
+      whitelistBook: BOOK,
+      operation: "whitelist",
+      requestContracts: [RC1],
+      nonce: "101",
+      deadline: 1_700_000_500,
+    });
+    expect(r2.isOk()).toBe(true);
+    // Book read happens (request-wide) but no new RC1 multicall / logs.
+    expect(stub.multicalls.length).toBe(3);
+    expect(stub.getLogsCalls).toBe(1);
   });
 });

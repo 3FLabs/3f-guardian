@@ -21,6 +21,9 @@ export {
   type RateLimitStore,
 } from "./rate-limit/store.js";
 
+export { type AsyncCache } from "./cache/types.js";
+export { inMemoryCache, type InMemoryCacheOptions } from "./cache/in-memory.js";
+
 export {
   buildIntentFundBindingChecks,
   buildIntentRequestBindingChecks,
@@ -34,6 +37,8 @@ export {
   passed,
   rollUp,
   skipped,
+  type A1Deps,
+  type A1OnChainData,
   type CheckRunner,
   type CheckRunnerError,
   type IntentFundBindingPolicy,

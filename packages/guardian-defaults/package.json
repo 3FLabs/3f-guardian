@@ -18,6 +18,10 @@
       "types": "./dist/rate-limit/index.d.ts",
       "import": "./dist/rate-limit/index.js"
     },
+    "./cache": {
+      "types": "./dist/cache/index.d.ts",
+      "import": "./dist/cache/index.js"
+    },
     "./checks": {
       "types": "./dist/checks/index.d.ts",
       "import": "./dist/checks/index.js"

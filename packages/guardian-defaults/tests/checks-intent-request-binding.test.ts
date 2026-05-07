@@ -8,8 +8,10 @@ import {
   type SigningContext,
 } from "@3flabs/guardian";
 
+import { inMemoryCache } from "../src/cache/in-memory.js";
 import {
   buildIntentRequestBindingChecks,
+  type A1OnChainData,
   type IntentRequestBindingPolicy,
 } from "../src/checks/intent-request-binding.js";
 
@@ -385,5 +387,232 @@ describe("buildIntentRequestBindingChecks", () => {
     const run = buildIntentRequestBindingChecks({ policy: policyMulti });
     const r = await run(ctx(stub.client), baseBody);
     expect(r.isOk()).toBe(true);
+  });
+
+  it("cache miss writes A1OnChainData and a subsequent call avoids all on-chain reads", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 5_500n,
+      getLogs: () => [
+        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 1,
+          args: { user: PULLER, roles: ROLE_PULLER },
+        },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 2,
+          args: { user: CONSUMER, roles: ROLE_CONSUMER },
+        },
+      ],
+    });
+    const cache = inMemoryCache<A1OnChainData>();
+    const run = buildIntentRequestBindingChecks({ policy, cache });
+
+    const r1 = await run(ctx(stub.client), baseBody);
+    expect(r1.isOk()).toBe(true);
+    expect(stub.multicalls.length).toBe(1);
+    expect(stub.getBlockNumberCalls).toBe(1);
+    expect(stub.getLogsCalls).toBe(1);
+
+    // Second call: cache hit — no further multicalls, no getLogs.
+    const r2 = await run(ctx(stub.client), baseBody);
+    expect(r2.isOk()).toBe(true);
+    expect(stub.multicalls.length).toBe(1);
+    expect(stub.getBlockNumberCalls).toBe(1);
+    expect(stub.getLogsCalls).toBe(1);
+  });
+
+  it("cache hit re-evaluates against the live policy (rogue owner added removes pass)", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 5_500n,
+      getLogs: () => [
+        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 1,
+          args: { user: PULLER, roles: ROLE_PULLER },
+        },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 2,
+          args: { user: CONSUMER, roles: ROLE_CONSUMER },
+        },
+      ],
+    });
+    const cache = inMemoryCache<A1OnChainData>();
+
+    // First call with permissive policy — cache fills.
+    const r1 = await buildIntentRequestBindingChecks({ policy, cache })(ctx(stub.client), baseBody);
+    expect(r1.isOk()).toBe(true);
+
+    // Second call with a tightened owners set — owner is no longer
+    // accepted. Re-runs against cached data; no new on-chain reads.
+    const tightened: IntentRequestBindingPolicy = {
+      ...policy,
+      acceptedOwners: new Map([[1, new Set<string>([])]]),
+    };
+    const r2 = await buildIntentRequestBindingChecks({ policy: tightened, cache })(
+      ctx(stub.client),
+      baseBody,
+    );
+    expect(r2.isErr()).toBe(true);
+    if (r2.isErr()) {
+      expect(r2.error).toBeInstanceOf(ValidationFailedError);
+      expect(
+        (r2.error as ValidationFailedError).checks.some(
+          (c) => !c.passed && c.description.includes("owner"),
+        ),
+      ).toBe(true);
+    }
+    // No additional on-chain reads.
+    expect(stub.multicalls.length).toBe(1);
+    expect(stub.getLogsCalls).toBe(1);
+  });
+
+  it("cache hit fails the factory check when the previously-matched factory was removed from the policy", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 5_500n,
+      getLogs: () => [
+        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 1,
+          args: { user: PULLER, roles: ROLE_PULLER },
+        },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 2,
+          args: { user: CONSUMER, roles: ROLE_CONSUMER },
+        },
+      ],
+    });
+    const cache = inMemoryCache<A1OnChainData>();
+
+    const r1 = await buildIntentRequestBindingChecks({ policy, cache })(ctx(stub.client), baseBody);
+    expect(r1.isOk()).toBe(true);
+
+    // Drop FACTORY from the accepted-factories set.
+    const tightened: IntentRequestBindingPolicy = {
+      ...policy,
+      acceptedRequestFactories: new Map([[1, new Set<string>([])]]),
+    };
+    const r2 = await buildIntentRequestBindingChecks({ policy: tightened, cache })(
+      ctx(stub.client),
+      baseBody,
+    );
+    expect(r2.isErr()).toBe(true);
+    if (r2.isErr()) {
+      expect(r2.error).toBeInstanceOf(ValidationFailedError);
+      const checks = (r2.error as ValidationFailedError).checks;
+      const factory = checks.find((c) => c.description.includes("deployed by"));
+      expect(factory?.passed).toBe(false);
+      // Owner / role checks remain skipped because the factory failed.
+      expect(checks.filter((c) => c.skipped === true).map((c) => c.description)).toEqual([
+        "owner of request contract is on the accepted-owners list",
+        "puller role on request contract is held only by accepted parties",
+        "consumer role on request contract is held only by accepted parties",
+      ]);
+    }
+    expect(stub.multicalls.length).toBe(1);
+  });
+
+  it("cache TTL expiry forces a re-fetch", async () => {
+    const stub = makeClient({
+      multicallResponses: [
+        [OWNER, true],
+        [OWNER, true],
+      ],
+      latestBlock: 5_500n,
+      getLogs: () => [
+        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 1,
+          args: { user: PULLER, roles: ROLE_PULLER },
+        },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 2,
+          args: { user: CONSUMER, roles: ROLE_CONSUMER },
+        },
+      ],
+    });
+    let now = 1_700_000_000_000;
+    const cache = inMemoryCache<A1OnChainData>({ now: () => now });
+    const run = buildIntentRequestBindingChecks({ policy, cache, cacheTtlMs: 1_000 });
+
+    const r1 = await run(ctx(stub.client, new Date(now)), baseBody);
+    expect(r1.isOk()).toBe(true);
+    expect(stub.multicalls.length).toBe(1);
+
+    // Advance past TTL — next call must refetch.
+    now += 1_500;
+    const r2 = await run(ctx(stub.client, new Date(now)), baseBody);
+    expect(r2.isOk()).toBe(true);
+    expect(stub.multicalls.length).toBe(2);
+    expect(stub.getLogsCalls).toBe(2);
+  });
+
+  it("noFactory result is cached so a subsequent call does not re-issue the multicall", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, false]],
+    });
+    const cache = inMemoryCache<A1OnChainData>();
+    const run = buildIntentRequestBindingChecks({ policy, cache });
+
+    const r1 = await run(ctx(stub.client), baseBody);
+    expect(r1.isErr()).toBe(true);
+    expect(stub.multicalls.length).toBe(1);
+
+    const r2 = await run(ctx(stub.client), baseBody);
+    expect(r2.isErr()).toBe(true);
+    expect(stub.multicalls.length).toBe(1); // hit, no extra read
+  });
+
+  it("treats cache.get errors as miss without failing the request", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 5_500n,
+      getLogs: () => [
+        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 1,
+          args: { user: PULLER, roles: ROLE_PULLER },
+        },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 2,
+          args: { user: CONSUMER, roles: ROLE_CONSUMER },
+        },
+      ],
+    });
+    const cache: import("../src/cache/types.js").AsyncCache<A1OnChainData> = {
+      async get() {
+        throw new Error("cache transport down");
+      },
+      async set() {
+        // swallow
+      },
+      async delete() {},
+    };
+    const run = buildIntentRequestBindingChecks({ policy, cache });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isOk()).toBe(true);
+    expect(stub.multicalls.length).toBe(1);
   });
 });

@@ -8,9 +8,14 @@ import {
   UpstreamUnavailableError,
 } from "@3flabs/guardian";
 
+import type { AsyncCache } from "../cache/types.js";
 import { whitelistBookAbi } from "../abi/whitelist-book.js";
 import { checkDeadline, checkNonceWindow, rollUp } from "./helpers.js";
-import { type IntentRequestBindingPolicy, runA1 } from "./intent-request-binding.js";
+import {
+  type A1OnChainData,
+  type IntentRequestBindingPolicy,
+  runA1,
+} from "./intent-request-binding.js";
 import type { CheckRunner, CheckRunnerError } from "./types.js";
 
 /**
@@ -48,8 +53,18 @@ export type RequestWhitelistingPolicy = IntentRequestBindingPolicy & {
 export function buildRequestWhitelistingChecks(deps: {
   policy: RequestWhitelistingPolicy;
   guardianSigner: Address;
+  /**
+   * Optional cache shared with the §A.1 runner. A whitelist op over
+   * `requestContracts: [a, b, c]` calls {@link runA1} once per entry;
+   * supplying a cache amortises repeat hits across that batch (and
+   * across separate requests targeting the same contract). See
+   * {@link A1Deps} for the storage contract.
+   */
+  cache?: AsyncCache<A1OnChainData>;
+  /** Per-write TTL for cached §A.1 on-chain data. See {@link A1Deps}. */
+  cacheTtlMs?: number;
 }): CheckRunner<RequestWhitelistingBody, false> {
-  const { policy, guardianSigner } = deps;
+  const { policy, guardianSigner, cache, cacheTtlMs } = deps;
 
   return async (
     ctx: SigningContext,
@@ -69,7 +84,7 @@ export function buildRequestWhitelistingChecks(deps: {
         const r = await runA1(
           ctx,
           { chainId: body.chainId, requestContract, deadline: body.deadline },
-          policy,
+          { policy, cache, cacheTtlMs },
         );
         if (r.isErr()) {
           // runA1 may emit a ValidationFailedError (rolled-up checks)
