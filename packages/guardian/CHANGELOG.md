@@ -1,5 +1,39 @@
 # @3flabs/guardian
 
+## 0.3.0
+
+### Minor Changes
+
+- 6e108e2: Add EIP-712 typed-data builders and sign-runner orchestrators for the
+  four v1 signing surfaces. New exports:
+
+  - `build{IntentRequestBinding,IntentFundBinding,IntentSwap,Whitelist,Unwhitelist}TypedData` — pure builders that take `{ domain, body }` (and `validator` for §A.4) and return `{ typedData, payloadHash }`. Typehashes mirror the on-chain verifiers in grunt and the request-whitelist repo (cross-checked in `tests/typed-data/typehashes.test.ts`). `canonicaliseSwapLegs` sorts swap legs by intent id (asset as tie-break) so `[A, B]` and `[B, A]` produce identical signatures.
+  - `makeSign{IntentRequestBinding,IntentFundBinding,IntentSwap,RequestWhitelisting}` — orchestrators that compose a host check runner with `eip712Domain()` resolution (ERC-5267) + `ctx.signTypedData` + the §6.4 SigningSuccess assembly. Returned values drop directly into `GuardianAbstractions`.
+  - `fetchEip712DomainNameVersion` — RPC fetch for `name`/`version` with an optional `Eip712DomainCache` (structurally compatible with `AsyncCache<{ name; version }>` from `@3flabs/guardian-defaults/cache`), so the per-contract domain read is amortised across signing calls.
+
+### Patch Changes
+
+- 6e108e2: Add an on-chain integration suite for the four `makeSign*` orchestrators.
+  Each vitest worker boots an isolated [prool](https://github.com/wevm/prool)-managed
+  anvil (path-routed at `/<workerId>`), deploys the Guardian-relevant slice
+  of the 3F protocol from the new private `@3flabs/guardian-test-fixtures`
+  workspace package, and exercises every orchestrator against the live
+  contracts. The `makeSignIntentRequestBinding` case additionally submits
+  the produced signature on-chain via `Facility.setRequest(…)` from a
+  facilitator-roled account and asserts the receipt is `success` —
+  proving the off-chain digest is accepted by the verifying contract.
+
+  A separate suite covers `fetchEip712DomainNameVersion`: it reads
+  `{ name: "3F", version: "1" }` from the deployed Facility,
+  `{ name: "3fRequestWhitelist", version: "1" }` from the RequestWhitelist
+  proxy, and verifies cache amortisation across signing calls.
+
+  Run via `bun run test:integration` from the repo root. Requires
+  `anvil` on `PATH`. The fixtures package is `"private": true` and not
+  published.
+
+  No public API changes.
+
 ## 0.2.1
 
 ### Patch Changes
