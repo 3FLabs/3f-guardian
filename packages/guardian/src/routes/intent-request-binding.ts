@@ -2,7 +2,7 @@ import { Elysia } from "elysia";
 
 import type { GuardianAbstractions } from "../abstractions.js";
 import { runSigning } from "../lib/signing.js";
-import { zErrorEnvelope, zSigningSuccess } from "../schemas/responses.js";
+import { pickErrorResponses, zSigningSuccess } from "../schemas/responses.js";
 import { zIntentRequestBindingBody } from "../schemas/intent-request-binding.js";
 
 import { makeAuthPlugin } from "../plugins/auth.js";
@@ -24,18 +24,16 @@ export function intentRequestBindingRoute(abs: GuardianAbstractions) {
           logger,
         }),
       {
+        // `parse: "json"` is documentation-only: the global rawBodyPlugin's
+        // onParse already produces the parsed body. We declare it per-route so
+        // `@elysiajs/openapi` can emit `requestBody.content["application/json"]`
+        // — its body-content loop only renders content for parsers whose
+        // `fn` is a string, never for plain function-typed onParse hooks.
+        parse: "json",
         body: zIntentRequestBindingBody,
         response: {
           200: zSigningSuccess,
-          400: zErrorEnvelope,
-          401: zErrorEnvelope,
-          403: zErrorEnvelope,
-          404: zErrorEnvelope,
-          422: zErrorEnvelope,
-          429: zErrorEnvelope,
-          500: zErrorEnvelope,
-          502: zErrorEnvelope,
-          503: zErrorEnvelope,
+          ...pickErrorResponses([400, 401, 403, 404, 422, 429, 500, 502, 503]),
         },
         detail: {
           tags: ["facility"],
