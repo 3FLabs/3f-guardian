@@ -70,13 +70,15 @@ jobs:
           # NPM_TOKEN secret required if the package is configured as an
           # OIDC trusted publisher on npmjs.com.
           #
-          # The rewrite step replaces `workspace:*` specifiers in
-          # packages/*/package.json with the real semver range — `npm publish`
-          # does not understand the `workspace:` protocol, so without this
-          # the published manifests would contain `"workspace:*"` literally
-          # and be uninstallable. The rewrite is intentionally inlined here
-          # (not a separate workflow step) so it only runs in the publish
-          # phase, never in the version phase that opens the Version PR.
-          publish: bun run scripts/rewrite-workspace-deps.ts && bunx changeset publish
+          # IMPORTANT: changesets/action@v1 splits this string by whitespace
+          # and execs the result directly — there is NO shell involved, so
+          # `&&`, pipes, etc. would be passed as literal positional args.
+          # That's why the chain (build → rewrite workspace:* → publish) is
+          # inside the `changeset:publish` npm script: `bun run` executes
+          # script bodies through a shell, where `&&` does what you expect.
+          # The rewrite runs only in the publish phase (changesets/action
+          # invokes `publish:` only when no pending changesets remain), so
+          # `workspace:*` stays untouched in the Version PR and on main.
+          publish: bun run changeset:publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
