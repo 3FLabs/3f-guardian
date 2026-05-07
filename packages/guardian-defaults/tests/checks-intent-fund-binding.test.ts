@@ -1,0 +1,207 @@
+import { describe, expect, it } from "vitest";
+import { type Address, zeroAddress } from "viem";
+
+import {
+  noopLogger,
+  StateConflictError,
+  UpstreamUnavailableError,
+  ValidationFailedError,
+  type SigningContext,
+} from "@3flabs/guardian";
+
+import {
+  buildIntentFundBindingChecks,
+  type IntentFundBindingPolicy,
+} from "../src/checks/intent-fund-binding.js";
+
+const FUND = "0xffffffffffffffffffffffffffffffffffffffff" as Address;
+const PM = "0x000000000000000000000000000000000000000a" as Address;
+const FACILITY = "0x0000000000000000000000000000000000000099" as Address;
+const FUND_OWNER = "0x000000000000000000000000000000000000beef" as Address;
+const ROGUE_OWNER = "0x00000000000000000000000000000000deadbeef" as Address;
+const SOME_FUND = "0x00000000000000000000000000000000cccccccc" as Address;
+
+const basePolicy: IntentFundBindingPolicy = {
+  maxDeadlineSecondsAhead: 600,
+  acceptedFunds: new Map([[1, new Set<string>([FUND])]]),
+  acceptedOwners: new Map([[1, new Set<string>([FUND_OWNER])]]),
+};
+
+const baseBody = {
+  chainId: 1,
+  facility: FACILITY,
+  intent: { id: "1" },
+  fundContract: FUND,
+  positionManager: PM,
+  deadline: 1_700_000_500,
+} as const;
+
+/**
+ * Shape returned by `IFacility.getIntent(uint256)`:
+ *   [properties, fund, request, resolved]
+ */
+function getIntentResult(args: {
+  fund: Address;
+  request?: Address;
+  resolved?: boolean;
+}): readonly [unknown, Address, Address, boolean] {
+  const properties = {
+    depositAsset: { asset: zeroAddress as Address, isPositionManager: false },
+    targetAsset: { asset: zeroAddress as Address, isPositionManager: true },
+    depositCap: 0n,
+    guardKey: zeroAddress as Address,
+    resolveStart: 0,
+    quorum: 1,
+    transferableIntent: false,
+  };
+  return [properties, args.fund, args.request ?? (zeroAddress as Address), args.resolved ?? false];
+}
+
+type MulticallSpy = {
+  client: SigningContext["client"];
+  /** Each entry corresponds to a multicall round-trip. */
+  calls: Array<{ contracts: ReadonlyArray<{ functionName: string; address: string }> }>;
+};
+
+/**
+ * Stub `client.multicall` with a queue of responses keyed by stage. Throw
+ * results simulate RPC failure / contract revert with `allowFailure: false`.
+ */
+function makeClient(responses: ReadonlyArray<readonly unknown[] | Error>): MulticallSpy {
+  const calls: MulticallSpy["calls"] = [];
+  let i = 0;
+  const client = {
+    multicall: async (params: {
+      contracts: ReadonlyArray<{ functionName: string; address: string }>;
+      allowFailure: boolean;
+    }) => {
+      calls.push({ contracts: params.contracts });
+      const r = responses[i++];
+      if (r === undefined) {
+        throw new Error(`unexpected multicall #${i}; no fixture configured`);
+      }
+      if (r instanceof Error) throw r;
+      return r;
+    },
+  } as unknown as SigningContext["client"];
+  return { client, calls };
+}
+
+function ctx(client: SigningContext["client"], now = new Date(1_700_000_000_000)): SigningContext {
+  return {
+    chainId: 1,
+    client,
+    requestId: "rid",
+    tokenId: "tid",
+    now,
+    signTypedData: (async () => {
+      throw new Error("unreachable");
+    }) as never,
+    logger: noopLogger,
+  };
+}
+
+describe("buildIntentFundBindingChecks", () => {
+  it("passes when every check is green and the intent has no current fund", async () => {
+    const stage1 = [FUND_OWNER, getIntentResult({ fund: zeroAddress as Address })];
+    const { client, calls } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isOk()).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.contracts.map((c) => c.functionName)).toEqual(["owner", "getIntent"]);
+  });
+
+  it("returns 422 (ValidationFailedError) when the fund is not on policy", async () => {
+    // No on-chain reads should fire — every on-chain entry must be skipped.
+    const { client, calls } = makeClient([]);
+    const run = buildIntentFundBindingChecks({
+      policy: { ...basePolicy, acceptedFunds: new Map() },
+    });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const checks = (r.error as ValidationFailedError).checks;
+      expect(checks.filter((c) => c.skipped === true).map((c) => c.description)).toEqual([
+        "fund contract owner is on the accepted-owners list",
+        "intent has no currently bound fund",
+        "fund holds DEPOSITOR_ROLE for the facility",
+      ]);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("returns 422 when the fund's owner is not accepted", async () => {
+    const stage1 = [
+      ROGUE_OWNER, // owner() — not on accepted-owners
+      getIntentResult({ fund: zeroAddress as Address }),
+    ];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(ValidationFailedError);
+  });
+
+  it("returns 409 (StateConflictError) when only the current-fund check fails", async () => {
+    const stage1 = [FUND_OWNER, getIntentResult({ fund: SOME_FUND })];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(StateConflictError);
+      expect((r.error as StateConflictError).checks.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("prefers 422 over 409 when both classes fail (per §6.6.1)", async () => {
+    const stage1 = [
+      ROGUE_OWNER, // 422: owner not accepted
+      getIntentResult({ fund: SOME_FUND }), // 409: current fund bound
+    ];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      expect(r.error).not.toBeInstanceOf(StateConflictError);
+    }
+  });
+
+  it("emits depositor-role as skipped", async () => {
+    const stage1 = [FUND_OWNER, getIntentResult({ fund: zeroAddress as Address })];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isOk()).toBe(true);
+    if (r.isOk()) {
+      const dep = r.value.find((c) => c.description.includes("DEPOSITOR_ROLE"));
+      expect(dep).toBeDefined();
+      expect(dep?.skipped).toBe(true);
+      expect(dep?.passed).toBe(true);
+    }
+  });
+
+  it("propagates RPC failure as UpstreamUnavailableError", async () => {
+    const { client } = makeClient([new Error("rpc 503")]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
+  });
+
+  it("rejects when the deadline exceeds the policy ceiling", async () => {
+    const stage1 = [FUND_OWNER, getIntentResult({ fund: zeroAddress as Address })];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({
+      policy: { ...basePolicy, maxDeadlineSecondsAhead: 60 }, // 60s window
+    });
+    // baseBody.deadline is 1_700_000_500; ctx() now is 1_700_000_000s → 500s ahead.
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(ValidationFailedError);
+  });
+});
