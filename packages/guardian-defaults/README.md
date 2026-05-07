@@ -109,15 +109,16 @@ yielding `Result<readonly CheckEntry[], CheckRunnerError<NeedsConflict>>`. On a 
 the entries are returned `Ok`; otherwise the error union is `ValidationFailedError | UpstreamUnavailableError`
 (plus `StateConflictError` for §A.2).
 
-Hosts compose this with their own typed-data builder and call `ctx.signTypedData` after a
-green run. Example for §A.3:
+Hosts compose this with the typed-data builders + sign-runner orchestrators in
+`@3flabs/guardian` to produce a drop-in `SignIntent…` / `SignRequestWhitelisting`
+abstraction:
 
 ```ts
 import {
   buildIntentSwapChecks,
   type IntentSwapPolicy,
 } from "@3flabs/guardian-defaults/checks";
-import type { SignIntentSwap } from "@3flabs/guardian";
+import { makeSignIntentSwap } from "@3flabs/guardian";
 
 const policy: IntentSwapPolicy = {
   maxDeadlineSecondsAhead: 600,
@@ -130,14 +131,21 @@ const policy: IntentSwapPolicy = {
   ]),
 };
 
-const checks = buildIntentSwapChecks({ policy });
-
-const signIntentSwap: SignIntentSwap = async (ctx, body) => {
-  const r = await checks(ctx, body);
-  if (r.isErr()) return r as never;
-  // ... build typed data, call ctx.signTypedData(...), return SigningSuccess
-};
+const signIntentSwap = makeSignIntentSwap({
+  checks: buildIntentSwapChecks({ policy }),
+  guardianSigner: "0x…", // metadata.guardianSigner
+});
 ```
+
+`makeSign*` reads each verifying contract's EIP-712 domain (`name`/`version`)
+via ERC-5267 `eip712Domain()` and hands the matching typed-data to
+`ctx.signTypedData`. Pass an optional `cache` (`AsyncCache<{ name; version }>`
+— `inMemoryCache` qualifies) to amortise the domain read across signing calls.
+
+For callers that need the raw building blocks, the four `build*TypedData`
+helpers (`buildIntentRequestBindingTypedData`, `buildIntentFundBindingTypedData`,
+`buildIntentSwapTypedData`, `buildWhitelistRequestTypedData` /
+`buildUnwhitelistRequestTypedData`) are exported alongside the orchestrators.
 
 Note: the runner reads the on-chain state itself via `ctx.client` and the bundled ABIs
 (see [ABIs](#abis) below). There is **no** oracle adapter port — the package is

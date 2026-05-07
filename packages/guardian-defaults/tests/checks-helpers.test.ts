@@ -132,9 +132,21 @@ describe("checkNonceWindow", () => {
     expect(entries[2]?.passed).toBe(true);
   });
 
-  it("flags nonce <= floor", () => {
+  it("accepts nonce == floor (on-chain rejects only nonce < floor)", () => {
     const entries = checkNonceWindow({
       nonce: 50n,
+      consumed: false,
+      floor: 50n,
+      maxAboveFloor: 1000n,
+    });
+    expect(entries[0]?.passed).toBe(true);
+    expect(entries[1]?.passed).toBe(true);
+    expect(entries[2]?.passed).toBe(true);
+  });
+
+  it("flags nonce < floor", () => {
+    const entries = checkNonceWindow({
+      nonce: 49n,
       consumed: false,
       floor: 50n,
       maxAboveFloor: 1000n,

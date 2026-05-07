@@ -224,7 +224,33 @@ describe("buildRequestWhitelistingChecks", () => {
     }
   });
 
-  it("fails when nonce is at or below floor", async () => {
+  it("fails when nonce is below floor", async () => {
+    // floor = 100, nonce = 99 ⇒ on-chain reverts NonceBelowFloor.
+    const stub = makeClient({
+      multicallResponses: [[100n, false]],
+    });
+    const r = await buildRequestWhitelistingChecks({
+      policy,
+      guardianSigner: GUARDIAN,
+    })(ctx(stub.client), {
+      chainId: 1,
+      whitelistBook: BOOK,
+      operation: "unwhitelist",
+      requestContracts: [RC1],
+      nonce: "99",
+      deadline: 1_700_000_500,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(
+        (r.error as ValidationFailedError).checks.some(
+          (c) => !c.passed && c.description.includes("at or above the on-chain nonce floor"),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("accepts nonce == floor (on-chain rejects only strictly below)", async () => {
     const stub = makeClient({
       multicallResponses: [[100n, false]],
     });
@@ -239,14 +265,7 @@ describe("buildRequestWhitelistingChecks", () => {
       nonce: "100",
       deadline: 1_700_000_500,
     });
-    expect(r.isErr()).toBe(true);
-    if (r.isErr()) {
-      expect(
-        (r.error as ValidationFailedError).checks.some(
-          (c) => !c.passed && c.description.includes("strictly greater"),
-        ),
-      ).toBe(true);
-    }
+    expect(r.isOk()).toBe(true);
   });
 
   it("fails when nonce exceeds floor + max", async () => {

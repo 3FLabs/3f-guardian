@@ -95,3 +95,43 @@ export { type Logger, type LogFn, noopLogger } from "./lib/logger.js";
 // Convenience SignTypedData implementations. KMS- / HSM-backed signers
 // belong to the host; this is the dev/test private-key envelope.
 export { privateKeyToSignTypedData } from "./signers/private-key.js";
+
+// EIP-712 typed-data builders + sign-runner orchestrators. The four
+// `build*TypedData` helpers produce `{ typedData, payloadHash }` for the
+// four signing surfaces against typehashes mirroring the on-chain
+// verifiers; the four `makeSign*` factories wire those builders to a
+// host-supplied check runner and `ctx.signTypedData`, returning a
+// drop-in `SignIntent…` / `SignRequestWhitelisting` callable.
+export {
+  buildIntentFundBindingTypedData,
+  buildIntentRequestBindingTypedData,
+  buildIntentSwapTypedData,
+  buildRequestWhitelistingTypedData,
+  buildUnwhitelistRequestTypedData,
+  buildWhitelistRequestTypedData,
+  canonicaliseSwapLegs,
+  makeSignIntentFundBinding,
+  makeSignIntentRequestBinding,
+  makeSignIntentSwap,
+  makeSignRequestWhitelisting,
+  setFundParamsTypes,
+  setRequestParamsTypes,
+  swapParamsTypes,
+  unwhitelistRequestTypes,
+  whitelistRequestTypes,
+  type Eip712Domain,
+  type Eip712DomainCacheDeps,
+  type GuardianTypedData,
+  type UnwhitelistRequestTypedData,
+  type WhitelistRequestTypedData,
+} from "./typed-data/index.js";
+
+// ERC-5267 domain fetcher with optional caching. Useful when a host
+// composes a custom `signIntent…` and wants to share the domain cache
+// with the four bundled `makeSign*` runners.
+export {
+  eip712DomainCacheKey,
+  fetchEip712DomainNameVersion,
+  type Eip712DomainCache,
+  type Eip712DomainNameVersion,
+} from "./lib/eip712-domain.js";

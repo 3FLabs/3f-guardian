@@ -24,20 +24,27 @@ Peer runtime: any ESM-compatible Node ≥ 20 / Bun ≥ 1.1.
 import { Result } from "better-result";
 import { http, createPublicClient, type Hex } from "viem";
 import { mainnet, base } from "viem/chains";
+import { privateKeyToAccount } from "viem/accounts";
 
 import {
   buildGuardianServer,
   privateKeyToSignTypedData,
-  ENDPOINT_SCOPES,
+  makeSignIntentRequestBinding,
+  makeSignIntentFundBinding,
+  makeSignIntentSwap,
+  makeSignRequestWhitelisting,
   UnauthenticatedError,
   UnsupportedChainError,
   type GuardianAbstractions,
-  type SignIntentRequestBinding,
-  type SignIntentFundBinding,
-  type SignIntentSwap,
-  type SignRequestWhitelisting,
   type TokenInfo,
 } from "@3flabs/guardian";
+import {
+  buildIntentRequestBindingChecks,
+  buildIntentFundBindingChecks,
+  buildIntentSwapChecks,
+  buildRequestWhitelistingChecks,
+} from "@3flabs/guardian-defaults/checks";
+import { inMemoryCache } from "@3flabs/guardian-defaults/cache";
 
 const clients = {
   1: createPublicClient({ chain: mainnet, transport: http(process.env.RPC_MAINNET) }),
@@ -48,17 +55,20 @@ const TOKENS = new Map<string, TokenInfo>([
   // [bearerToken, { tokenId, scopes: new Set([...]), requiresHmac, hmacSecret? }]
 ]);
 
-// Each sign* function: validate (Appendix-A checks), then build typed data and call
-// ctx.signTypedData. The check primitives live in `@3flabs/guardian-defaults/checks`.
-declare const signIntentRequestBinding: SignIntentRequestBinding;
-declare const signIntentFundBinding:    SignIntentFundBinding;
-declare const signIntentSwap:           SignIntentSwap;
-declare const signRequestWhitelisting:  SignRequestWhitelisting;
+const PRIVATE_KEY = process.env.GUARDIAN_SIGNER_KEY as Hex;
+const guardianSigner = privateKeyToAccount(PRIVATE_KEY).address;
+const signTypedData = privateKeyToSignTypedData(PRIVATE_KEY);
+
+// Optional shared cache for ERC-5267 `eip712Domain()` reads (one read
+// amortised across every signing call to that contract).
+const eip712DomainCache = inMemoryCache<{ name: string; version: string }>({
+  defaultTtlMs: 24 * 60 * 60_000,
+});
 
 const abs: GuardianAbstractions = {
   metadata: {
     build: process.env.BUILD_ID ?? "0.1.0",
-    guardianSigner: "0x…",
+    guardianSigner,
     supportedChains: [1, 8453],
   },
   liveness: async () => Result.ok(),
@@ -74,11 +84,31 @@ const abs: GuardianAbstractions = {
       ? Result.ok(info)
       : Result.err(new UnauthenticatedError({ message: "Unknown token" }));
   },
-  signTypedData: privateKeyToSignTypedData(process.env.GUARDIAN_SIGNER_KEY as Hex),
-  signIntentRequestBinding,
-  signIntentFundBinding,
-  signIntentSwap,
-  signRequestWhitelisting,
+  signTypedData,
+  // Each `makeSign*` factory wires a defaults-package check runner into a
+  // ready-to-use validate-and-sign abstraction: the runner evaluates
+  // Appendix-A on-chain checks, this package fetches the EIP-712 domain
+  // (`eip712Domain()` per ERC-5267) and signs the matching typed-data.
+  signIntentRequestBinding: makeSignIntentRequestBinding({
+    checks: buildIntentRequestBindingChecks({ policy: /* see defaults README */ }),
+    guardianSigner,
+    cache: eip712DomainCache,
+  }),
+  signIntentFundBinding: makeSignIntentFundBinding({
+    checks: buildIntentFundBindingChecks({ policy: /* … */ }),
+    guardianSigner,
+    cache: eip712DomainCache,
+  }),
+  signIntentSwap: makeSignIntentSwap({
+    checks: buildIntentSwapChecks({ policy: /* … */ }),
+    guardianSigner,
+    cache: eip712DomainCache,
+  }),
+  signRequestWhitelisting: makeSignRequestWhitelisting({
+    checks: buildRequestWhitelistingChecks({ policy: /* … */, guardianSigner }),
+    guardianSigner,
+    cache: eip712DomainCache,
+  }),
 };
 
 buildGuardianServer(abs).listen(3000);
@@ -115,6 +145,26 @@ type TokenInfo = {
   readonly hmacSecret?: string;                   // required when requiresHmac is true
 };
 ```
+
+## EIP-712 typed-data builders
+
+Each of the four signing surfaces ships:
+
+- `build*TypedData(...)` — pure builder returning `{ typedData, payloadHash }`. Useful for tests and bespoke signers.
+- `makeSign*(...)` — orchestrator that composes a host-supplied check runner, the typed-data builder, ERC-5267 `eip712Domain()` resolution, `ctx.signTypedData`, and the §6.4 SigningSuccess assembly.
+
+| Endpoint | Builder | Orchestrator | Verifying contract |
+|---|---|---|---|
+| `intent-request-bindings` (§A.1) | `buildIntentRequestBindingTypedData` | `makeSignIntentRequestBinding` | `body.facility` |
+| `intent-fund-bindings` (§A.2)    | `buildIntentFundBindingTypedData`    | `makeSignIntentFundBinding`    | `body.facility` |
+| `intent-swaps` (§A.3)            | `buildIntentSwapTypedData`           | `makeSignIntentSwap`           | `body.facility` |
+| `request-whitelistings` (§A.4)   | `buildWhitelistRequestTypedData` / `buildUnwhitelistRequestTypedData` | `makeSignRequestWhitelisting` | `body.whitelistBook` |
+
+Typehashes mirror the on-chain verifiers (grunt's `Facility*` and the `RequestWhitelist` repo); `domainName` and `version` are read from `eip712Domain()` per ERC-5267. The `tests/typed-data/typehashes.test.ts` suite cross-checks each typehash against the literal pinned in the contract.
+
+For `intent-swaps`, `canonicaliseSwapLegs` sorts legs by ascending intent id (asset address as tie-break) so `[A, B]` and `[B, A]` produce byte-identical `signature` and `payloadHash` (§7.5).
+
+The orchestrators accept an optional `Eip712DomainCache` (structurally compatible with `AsyncCache<{ name; version }>` from `@3flabs/guardian-defaults/cache`) so the per-contract `eip712Domain()` read is amortised across signing calls. `fetchEip712DomainNameVersion` is exported separately for callers that compose their own runners.
 
 ## `SigningContext`
 

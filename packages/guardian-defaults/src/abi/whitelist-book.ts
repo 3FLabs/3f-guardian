@@ -5,9 +5,11 @@
  * own nonce floor and consumed-bitmap. The §A.4 runner reads both with
  * `guardianSigner` as the validator key.
  *
- *  - `validatorNonceFloor(v)` — the monotonic floor; signatures with
- *    `nonce < floor` are rejected on-chain. Equality (`nonce == floor`)
- *    is also rejected; the runner mirrors this strictly.
+ *  - `validatorNonceFloor(v)` — the monotonic floor; on-chain
+ *    `QuorumSigLib.assertSigValid` rejects signatures with
+ *    `nonce < floor` (strictly less-than), so `nonce == floor` is the
+ *    one usable nonce at the floor itself. The runner mirrors this:
+ *    `nonce >= floor` passes.
  *  - `isNonceConsumed(v, n)` — true iff bit `n` of `v`'s bitmap is set.
  *    Independent of the floor (a nonce below the floor returns `false`
  *    here even though it would be unusable).
