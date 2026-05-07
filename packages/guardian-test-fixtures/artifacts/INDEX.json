@@ -51,12 +51,12 @@
     "name": "OwnableMockFund",
     "sourceRepo": "local",
     "sourcePath": "OwnableMockFund.sol",
-    "sourceCommitHash": "37181df6db0bdbd2ef0c3f8064f1ae248fcc054f"
+    "sourceCommitHash": "04a221b95f791f67fdb0957cdd7dd4acd7ba5e38"
   },
   {
     "name": "Multicall3",
     "sourceRepo": "local",
     "sourcePath": "Multicall3.sol",
-    "sourceCommitHash": "37181df6db0bdbd2ef0c3f8064f1ae248fcc054f"
+    "sourceCommitHash": "04a221b95f791f67fdb0957cdd7dd4acd7ba5e38"
   }
 ]

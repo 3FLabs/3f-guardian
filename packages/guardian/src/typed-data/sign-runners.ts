@@ -91,6 +91,7 @@ async function resolveDomain(args: {
     verifyingContract,
     cache: cacheDeps.cache,
     ttlMs: cacheDeps.cacheTtlMs,
+    logger: ctx.logger,
   });
 }
 
@@ -297,40 +298,39 @@ export function makeSignRequestWhitelisting(
     // Branch on `operation` so each call to `signTypedData` carries a
     // concrete (non-union) `TypedDataDefinition` — viem's generic infers
     // the type list from the parameters and would otherwise reject a
-    // union of two distinct-key type maps.
+    // union of two distinct-key type maps. We build, sign, and return
+    // inside each branch so the typed-data narrowing reaches the
+    // signer call without identity-cast escape hatches.
     const sharedDomain = {
       ...domainResult.value,
       chainId: body.chainId,
       verifyingContract: body.whitelistBook,
     } as const;
     const { operation, ...rest } = body;
-    const built =
-      operation === "whitelist"
-        ? buildWhitelistRequestTypedData({
-            domain: sharedDomain,
-            body: rest,
-            validator: guardianSigner,
-          })
-        : buildUnwhitelistRequestTypedData({
-            domain: sharedDomain,
-            body: rest,
-            validator: guardianSigner,
-          });
+    const buildArgs = { domain: sharedDomain, body: rest, validator: guardianSigner };
 
-    const sigResult =
-      operation === "whitelist"
-        ? await ctx.signTypedData(
-            built.typedData as ReturnType<typeof buildWhitelistRequestTypedData>["typedData"],
-          )
-        : await ctx.signTypedData(
-            built.typedData as ReturnType<typeof buildUnwhitelistRequestTypedData>["typedData"],
-          );
+    if (operation === "whitelist") {
+      const { typedData, payloadHash } = buildWhitelistRequestTypedData(buildArgs);
+      const sigResult = await ctx.signTypedData(typedData);
+      if (sigResult.isErr()) return Result.err(sigResult.error);
+      return Result.ok({
+        guardian: guardianSigner,
+        signature: sigResult.value,
+        payloadHash,
+        signedAt: nowIso(ctx.now),
+        checks: [...checkResult.value],
+        address: guardianSigner,
+        nonce: body.nonce,
+      });
+    }
+
+    const { typedData, payloadHash } = buildUnwhitelistRequestTypedData(buildArgs);
+    const sigResult = await ctx.signTypedData(typedData);
     if (sigResult.isErr()) return Result.err(sigResult.error);
-
     return Result.ok({
       guardian: guardianSigner,
       signature: sigResult.value,
-      payloadHash: built.payloadHash,
+      payloadHash,
       signedAt: nowIso(ctx.now),
       checks: [...checkResult.value],
       address: guardianSigner,

@@ -2,6 +2,7 @@ import { Result } from "better-result";
 import type { Address, PublicClient } from "viem";
 
 import { UpstreamUnavailableError } from "../errors/tagged.js";
+import type { Logger } from "./logger.js";
 
 /**
  * The two pieces of an EIP-712 domain that the Guardian cannot infer
@@ -73,7 +74,9 @@ export function eip712DomainCacheKey(chainId: number, verifyingContract: Address
  *
  * If `cache` is supplied, a hit short-circuits the read; misses are
  * back-filled with the optional `ttlMs` (best-effort — a thrown cache
- * write is swallowed since a flaky cache must not block signing).
+ * write is swallowed since a flaky cache must not block signing). When
+ * `logger` is supplied, both swallowed paths emit a `warn` record so a
+ * misconfigured / unreachable cache is observable in production.
  */
 export async function fetchEip712DomainNameVersion(args: {
   client: PublicClient;
@@ -81,16 +84,21 @@ export async function fetchEip712DomainNameVersion(args: {
   verifyingContract: Address;
   cache?: Eip712DomainCache;
   ttlMs?: number;
+  logger?: Logger;
 }): Promise<Result<Eip712DomainNameVersion, UpstreamUnavailableError>> {
-  const { client, chainId, verifyingContract, cache, ttlMs } = args;
+  const { client, chainId, verifyingContract, cache, ttlMs, logger } = args;
   const key = eip712DomainCacheKey(chainId, verifyingContract);
 
   if (cache) {
     try {
       const hit = await cache.get(key);
       if (hit) return Result.ok(hit);
-    } catch {
+    } catch (e) {
       // Treat a thrown cache as a miss; we still have the on-chain path.
+      logger?.warn(
+        { err: e instanceof Error ? e.message : String(e), chainId, verifyingContract, key },
+        "eip712Domain cache.get threw — falling back to on-chain read",
+      );
     }
   }
 
@@ -116,8 +124,12 @@ export async function fetchEip712DomainNameVersion(args: {
   if (cache) {
     try {
       await cache.set(key, result, ttlMs !== undefined ? { ttlMs } : undefined);
-    } catch {
+    } catch (e) {
       // Best-effort write — never block on a cache failure.
+      logger?.warn(
+        { err: e instanceof Error ? e.message : String(e), chainId, verifyingContract, key },
+        "eip712Domain cache.set threw — value not persisted",
+      );
     }
   }
 

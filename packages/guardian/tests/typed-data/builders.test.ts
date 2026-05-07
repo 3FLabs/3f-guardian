@@ -154,6 +154,28 @@ describe("buildIntentSwapTypedData", () => {
     expect(result[0].asset).toBe(TOKEN_A);
   });
 
+  it("canonicaliseSwapLegs returns input order when all comparator keys tie (id+asset+amount)", () => {
+    // Edge case: every rung of the comparator chain (id → asset → amount)
+    // ties, so the function falls through to the `[a, b]` return. The two
+    // legs are byte-identical, so order doesn't matter for the digest —
+    // we just want to prove the function doesn't loop or throw on a tie.
+    const a = { intent: { id: "1" }, asset: TOKEN_A, amount: "100" };
+    const b = { intent: { id: "1" }, asset: TOKEN_A, amount: "100" };
+    const [first, second] = canonicaliseSwapLegs([a, b]);
+    expect(first).toBe(a);
+    expect(second).toBe(b);
+  });
+
+  it("canonicaliseSwapLegs tie-breaks by amount when id+asset tie", () => {
+    // Same id, same asset, different amount — the third comparator rung
+    // disambiguates so the leg with the smaller amount lands first.
+    const big = { intent: { id: "1" }, asset: TOKEN_A, amount: "200" };
+    const small = { intent: { id: "1" }, asset: TOKEN_A, amount: "100" };
+    const [first, second] = canonicaliseSwapLegs([big, small]);
+    expect(first).toBe(small);
+    expect(second).toBe(big);
+  });
+
   it("canonicaliseSwapLegs throws when given fewer or more than two legs", () => {
     expect(() => canonicaliseSwapLegs([])).toThrow();
     expect(() =>
