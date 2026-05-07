@@ -66,6 +66,7 @@ export type AddressBook = {
     readonly consumer: DeployedAccount;
     readonly validator1: DeployedAccount;
     readonly validator2: DeployedAccount;
+    readonly validator3: DeployedAccount;
   };
 };
 
@@ -128,11 +129,12 @@ export async function deployGuardianStack(
   client: IntegrationClients,
   opts?: DeployOptions,
 ): Promise<AddressBook> {
-  const { owner, facilitator, guardian, puller, consumer, validator1, validator2 } = testAccounts;
+  const { owner, facilitator, guardian, puller, consumer, validator1, validator2, validator3 } =
+    testAccounts;
 
   // Fund all role-bearing test accounts so they can pay gas.
   await Promise.all(
-    [owner, facilitator, guardian, puller, consumer, validator1, validator2].map((a) =>
+    [owner, facilitator, guardian, puller, consumer, validator1, validator2, validator3].map((a) =>
       client.testClient.setBalance({ address: a.address, value: 10n ** 20n }),
     ),
   );
@@ -273,10 +275,17 @@ export async function deployGuardianStack(
   /* 7. RequestWhitelist via fresh ERC1967Factory -------------------- */
   const whitelistBookImpl = await deployArtifact(client, "RequestWhitelist", [], "");
   const erc1967Factory = await deployArtifact(client, "ERC1967Factory", [], "");
+  // Three validators so the contract's `quorum_ < validators_.length`
+  // invariant accepts up to quorum=2 (needed for the §7.6 e2e tests).
   const wlInitData = encodeFunctionData({
     abi: parseAbi(["function initialize(address,address[],uint16,address[])"]),
     functionName: "initialize",
-    args: [owner.address, [validator1.address, validator2.address], opts?.whitelistQuorum ?? 1, []],
+    args: [
+      owner.address,
+      [validator1.address, validator2.address, validator3.address],
+      opts?.whitelistQuorum ?? 1,
+      [],
+    ],
   });
   const proxyDeployHash = await client.walletClient.sendTransaction({
     account: owner.account,
@@ -353,6 +362,7 @@ export async function deployGuardianStack(
       consumer,
       validator1,
       validator2,
+      validator3,
     },
   };
 }
