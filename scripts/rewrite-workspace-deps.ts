@@ -18,7 +18,6 @@
  * into the Version Packages PR and break local workspace symlinking.
  */
 
-import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -40,18 +39,15 @@ const DEP_FIELDS = [
   "optionalDependencies",
 ] as const;
 
-const packageDirs = readdirSync(PACKAGES_DIR).filter((entry) =>
-  statSync(join(PACKAGES_DIR, entry)).isDirectory(),
-);
+const manifestPaths = [
+  ...new Bun.Glob("*/package.json").scanSync({ cwd: PACKAGES_DIR, absolute: true }),
+].sort();
 
 const versions = new Map<string, string>();
 const manifests: Array<{ path: string; pkg: PackageJson }> = [];
 
-for (const dir of packageDirs) {
-  const path = join(PACKAGES_DIR, dir, "package.json");
-  const file = Bun.file(path);
-  if (!(await file.exists())) continue;
-  const pkg = (await file.json()) as PackageJson;
+for (const path of manifestPaths) {
+  const pkg = (await Bun.file(path).json()) as PackageJson;
   versions.set(pkg.name, pkg.version);
   manifests.push({ path, pkg });
 }

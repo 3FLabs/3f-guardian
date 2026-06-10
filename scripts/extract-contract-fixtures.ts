@@ -10,19 +10,20 @@
  * time so a `--check` mode can fail CI when the bundled artifacts drift
  * from the sibling repos.
  *
+ * Repo locations default to sibling checkouts (`../grunt`,
+ * `../3f-request-whitelist`) and can be overridden with the
+ * `GRUNT_REPO_ROOT` / `WHITELIST_REPO_ROOT` env vars — useful for
+ * extracting from a pristine clone pinned to a release tag.
+ *
  * Why this exists: integration tests deploy real contracts on a clean
  * anvil. We don't want every contributor to run `forge build` against
  * unrelated repos; we don't want to invoke foundry from CI either.
  * Checked-in artifacts are the trade-off.
  */
 
-import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(__dirname, "..");
+const REPO_ROOT = resolve(import.meta.dir, "..");
 const ARTIFACT_DIR = resolve(REPO_ROOT, "packages/guardian-test-fixtures/artifacts");
 
 type Source = {
@@ -37,8 +38,8 @@ type Source = {
 };
 
 const REPO_ROOTS = {
-  grunt: resolve(REPO_ROOT, "../grunt"),
-  whitelist: resolve(REPO_ROOT, "../3f-request-whitelist"),
+  grunt: Bun.env.GRUNT_REPO_ROOT ?? resolve(REPO_ROOT, "../grunt"),
+  whitelist: Bun.env.WHITELIST_REPO_ROOT ?? resolve(REPO_ROOT, "../3f-request-whitelist"),
   local: resolve(REPO_ROOT, "packages/guardian-test-fixtures/contracts"),
 } as const;
 
@@ -76,19 +77,17 @@ type StampedArtifact = {
 };
 
 function gitHead(repoPath: string): string {
-  try {
-    return execSync("git rev-parse HEAD", { cwd: repoPath, encoding: "utf8" }).trim();
-  } catch {
-    return "no-git";
-  }
+  const proc = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repoPath });
+  if (!proc.success) return "no-git";
+  return proc.stdout.toString().trim();
 }
 
-function loadFoundryArtifact(absPath: string): {
+async function loadFoundryArtifact(absPath: string): Promise<{
   abi: unknown;
   bytecode: `0x${string}`;
   deployedBytecode: `0x${string}`;
-} {
-  const raw = JSON.parse(readFileSync(absPath, "utf8")) as {
+}> {
+  const raw = (await Bun.file(absPath).json()) as {
     abi: unknown;
     bytecode: { object: string };
     deployedBytecode: { object: string };
@@ -100,16 +99,16 @@ function loadFoundryArtifact(absPath: string): {
   };
 }
 
-function stamp(src: Source): StampedArtifact {
+async function stamp(src: Source): Promise<StampedArtifact> {
   const repoRoot = REPO_ROOTS[src.repo];
   const artifactAbs = join(repoRoot, src.artifactPath);
-  if (!existsSync(artifactAbs)) {
+  if (!(await Bun.file(artifactAbs).exists())) {
     throw new Error(
       `Missing foundry artifact for ${src.name}: ${artifactAbs}\n` +
         `  Run \`forge build\` in ${repoRoot} (or in our local contracts dir for local sources) and re-run this script.`,
     );
   }
-  const { abi, bytecode, deployedBytecode } = loadFoundryArtifact(artifactAbs);
+  const { abi, bytecode, deployedBytecode } = await loadFoundryArtifact(artifactAbs);
   return {
     name: src.name,
     abi,
@@ -125,51 +124,60 @@ function fixturePath(name: string): string {
   return join(ARTIFACT_DIR, `${name}.json`);
 }
 
-function writeArtifact(stamped: StampedArtifact): void {
-  if (!existsSync(ARTIFACT_DIR)) mkdirSync(ARTIFACT_DIR, { recursive: true });
-  writeFileSync(fixturePath(stamped.name), `${JSON.stringify(stamped, null, 2)}\n`, "utf8");
+async function writeArtifact(stamped: StampedArtifact): Promise<void> {
+  // Bun.write creates missing parent directories itself.
+  await Bun.write(fixturePath(stamped.name), `${JSON.stringify(stamped, null, 2)}\n`);
 }
 
-function readArtifact(name: string): StampedArtifact | undefined {
-  const path = fixturePath(name);
-  if (!existsSync(path)) return undefined;
-  return JSON.parse(readFileSync(path, "utf8")) as StampedArtifact;
+async function readArtifact(name: string): Promise<StampedArtifact | undefined> {
+  const file = Bun.file(fixturePath(name));
+  if (!(await file.exists())) return undefined;
+  return (await file.json()) as StampedArtifact;
 }
 
-function buildLocalIfNeeded() {
+async function buildLocalIfNeeded(): Promise<void> {
   const sentinels = [
     "out/OwnableMockFund.sol/OwnableMockFund.json",
     "out/Multicall3.sol/Multicall3.json",
   ];
-  const allBuilt = sentinels.every((p) => existsSync(join(REPO_ROOTS.local, p)));
-  if (allBuilt) return;
+  const built = await Promise.all(
+    sentinels.map((p) => Bun.file(join(REPO_ROOTS.local, p)).exists()),
+  );
+  if (built.every(Boolean)) return;
   console.log(`[fixtures] forge build (${REPO_ROOTS.local})…`);
-  execSync("forge build", { cwd: REPO_ROOTS.local, stdio: "inherit" });
+  const proc = Bun.spawnSync(["forge", "build"], {
+    cwd: REPO_ROOTS.local,
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  if (!proc.success) {
+    throw new Error(`forge build failed in ${REPO_ROOTS.local} (exit ${proc.exitCode})`);
+  }
 }
 
-function writeIndex(stamps: readonly StampedArtifact[]) {
+async function writeIndex(stamps: readonly StampedArtifact[]): Promise<void> {
   const index = stamps.map((s) => ({
     name: s.name,
     sourceRepo: s.sourceRepo,
     sourcePath: s.sourcePath,
     sourceCommitHash: s.sourceCommitHash,
   }));
-  writeFileSync(join(ARTIFACT_DIR, "INDEX.json"), `${JSON.stringify(index, null, 2)}\n`, "utf8");
+  await Bun.write(join(ARTIFACT_DIR, "INDEX.json"), `${JSON.stringify(index, null, 2)}\n`);
 }
 
-function run(checkOnly: boolean) {
+async function run(checkOnly: boolean): Promise<void> {
   // `--check` mode is read-only: never invoke `forge build` or mutate the
   // local `out/` tree. Verification must be deterministic and runnable in
   // CI environments without Foundry installed (the bundled artifacts are
   // the source of truth there).
-  if (!checkOnly) buildLocalIfNeeded();
+  if (!checkOnly) await buildLocalIfNeeded();
 
-  const stamped = SOURCES.map(stamp);
+  const stamped = await Promise.all(SOURCES.map(stamp));
 
   if (checkOnly) {
     let drift = 0;
     for (const s of stamped) {
-      const existing = readArtifact(s.name);
+      const existing = await readArtifact(s.name);
       if (!existing) {
         console.error(`[fixtures] MISSING: ${s.name} (${fixturePath(s.name)}) — run \`bun run fixtures:extract\``);
         drift++;
@@ -201,12 +209,12 @@ function run(checkOnly: boolean) {
   }
 
   for (const s of stamped) {
-    writeArtifact(s);
+    await writeArtifact(s);
     console.log(`[fixtures] wrote ${fixturePath(s.name)} (${s.sourceRepo}@${s.sourceCommitHash.slice(0, 7)})`);
   }
-  writeIndex(stamped);
+  await writeIndex(stamped);
   console.log(`[fixtures] wrote ${join(ARTIFACT_DIR, "INDEX.json")}`);
 }
 
-const checkOnly = process.argv.includes("--check");
-run(checkOnly);
+const checkOnly = Bun.argv.includes("--check");
+await run(checkOnly);
