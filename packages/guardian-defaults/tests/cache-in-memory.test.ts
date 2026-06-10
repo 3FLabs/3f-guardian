@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { inMemoryCache } from "../src/cache/in-memory.js";
+import { DEFAULT_MAX_ENTRIES, inMemoryCache } from "../src/cache/in-memory.js";
 
 describe("inMemoryCache", () => {
   it("returns undefined for an unknown key", async () => {
@@ -88,5 +88,42 @@ describe("inMemoryCache", () => {
   it("rejects an invalid maxEntries", () => {
     expect(() => inMemoryCache({ maxEntries: -1 })).toThrow();
     expect(() => inMemoryCache({ maxEntries: 1.5 })).toThrow();
+  });
+
+  it("bounds a zero-config cache at DEFAULT_MAX_ENTRIES entries", async () => {
+    expect(DEFAULT_MAX_ENTRIES).toBe(4096);
+    const cache = inMemoryCache<number>();
+    for (let i = 0; i <= DEFAULT_MAX_ENTRIES; i++) {
+      await cache.set(`k${i}`, i);
+    }
+    expect(await cache.get("k0")).toBeUndefined(); // oldest evicted
+    expect(await cache.get("k1")).toBe(1);
+    expect(await cache.get(`k${DEFAULT_MAX_ENTRIES}`)).toBe(DEFAULT_MAX_ENTRIES);
+  });
+
+  it("explicit maxEntries: 0 opts into unbounded growth", async () => {
+    const cache = inMemoryCache<number>({ maxEntries: 0 });
+    for (let i = 0; i <= DEFAULT_MAX_ENTRIES; i++) {
+      await cache.set(`k${i}`, i);
+    }
+    expect(await cache.get("k0")).toBe(0);
+    expect(await cache.get(`k${DEFAULT_MAX_ENTRIES}`)).toBe(DEFAULT_MAX_ENTRIES);
+  });
+
+  it("set rejects an invalid per-call ttlMs and leaves existing entries intact", async () => {
+    let now = 1_000_000;
+    const cache = inMemoryCache<string>({ now: () => now });
+    await cache.set("k", "v", { ttlMs: 1_000 });
+
+    await expect(cache.set("k", "evil", { ttlMs: Number.NaN })).rejects.toThrow();
+    await expect(cache.set("k", "evil", { ttlMs: 0 })).rejects.toThrow();
+    await expect(cache.set("k", "evil", { ttlMs: -5 })).rejects.toThrow();
+    await expect(cache.set("k", "evil", { ttlMs: Number.POSITIVE_INFINITY })).rejects.toThrow();
+
+    // The original entry is untouched by the rejected writes...
+    expect(await cache.get("k")).toBe("v");
+    // ...and still expires normally — no immortal NaN entry was created.
+    now += 1_001;
+    expect(await cache.get("k")).toBeUndefined();
   });
 });

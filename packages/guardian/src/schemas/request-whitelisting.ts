@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { zAddress, zChainId, zDeadlineSeconds, zUintStringBelowMax } from "./primitives.js";
-import { zSigningSuccess } from "./responses.js";
+import { zAddressResponse, zSigningSuccess } from "./responses.js";
 
 export const zWhitelistOperation = z.enum(["whitelist", "unwhitelist"]);
 export type WhitelistOperation = z.infer<typeof zWhitelistOperation>;
@@ -37,7 +37,7 @@ export type RequestWhitelistingBody = z.infer<typeof zRequestWhitelistingBody>;
 
 export const zRequestWhitelistingResponse = zSigningSuccess
   .extend({
-    address: zAddress.describe(
+    address: zAddressResponse.describe(
       "Signing address bound into the EIP-712 payload as a structural " +
         "parameter. Equal to guardian in v1, exposed separately because the " +
         "on-chain whitelist book carries it as an explicit payload " +

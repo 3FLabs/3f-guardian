@@ -32,6 +32,15 @@ import { requestWhitelistingRoute } from "./routes/request-whitelisting.js";
  *
  * The server returned is a vanilla Elysia instance so callers retain the
  * ability to `.listen()`, `.handle()` for tests, or compose further.
+ *
+ * Composition caveats — guardian's request pipeline is global, so routes
+ * a host adds to the returned instance inherit:
+ *  - the §6.1 JSON-only content-type guard on POST / PUT (415 otherwise);
+ *  - guardian's body parser for `application/json` and `text/*` bodies
+ *    (other content types are left untouched for Elysia's own parser
+ *    chain) and its `maxBodyBytes` cap (413 past the cap);
+ *  - the `requestId` / `logger` / `rawBody` context keys, which shadow
+ *    any same-named keys the host derives.
  */
 export function buildGuardianServer(abs: GuardianAbstractions) {
   return new Elysia({ name: "guardian" })
@@ -92,7 +101,7 @@ export function buildGuardianServer(abs: GuardianAbstractions) {
     .use(versionHeaderPlugin(abs.metadata.build))
     .use(requestIdPlugin)
     .use(loggerPlugin(abs.logger))
-    .use(rawBodyPlugin)
+    .use(rawBodyPlugin(abs.maxBodyBytes))
     .use(contentTypePlugin)
     .use(healthRoute(abs))
     .use(versionRoute(abs))

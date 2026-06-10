@@ -7,5 +7,5 @@
       "@3flabs/guardian": ["../guardian/src/index.ts"]
     }
   },
-  "include": ["src/**/*", "tests/**/*"]
+  "include": ["src/**/*", "tests/**/*", "vitest.config.ts", "vitest.integration.config.ts"]
 }

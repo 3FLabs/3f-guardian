@@ -11,7 +11,15 @@ import {
 import type { AsyncCache } from "../cache/types.js";
 import { requestAbi, ROLE_CONSUMER, ROLE_PULLER } from "../abi/request.js";
 import { requestFactoryAbi } from "../abi/request-factory.js";
-import { checkDeadline, checkMembership, failed, passed, rollUp, skipped } from "./helpers.js";
+import {
+  checkDeadline,
+  checkMembership,
+  failed,
+  isDeterministicContractCallFailure,
+  passed,
+  rollUp,
+  skipped,
+} from "./helpers.js";
 import { holdersOf, scanRoleHolders } from "./role-events.js";
 import type { CheckRunner, CheckRunnerError } from "./types.js";
 
@@ -38,8 +46,25 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
  *
  *  - `eventScanMaxLookbackBlocks` — how far back the scan walks before
  *    giving up. If the contract was deployed earlier than
- *    `latestBlock - this`, the puller / consumer entries are emitted
- *    as `skipped:true` (we cannot prove the holder set is complete).
+ *    `latestBlock - this`, the scan outcome is "too old": we cannot
+ *    prove the holder set is complete. Partial in-window data is still
+ *    used one-sidedly — any rogue grant OBSERVED inside the window
+ *    fails the puller / consumer checks — and the residual disposition
+ *    is governed by `onLookbackExhausted`.
+ *
+ *  - `eventScanDeadlineMs` — optional wall-clock budget for a single
+ *    role-events scan. When exceeded the scan aborts and surfaces as
+ *    `UpstreamUnavailableError` (503), so a deep scan cannot hold a
+ *    request handler indefinitely. Omitted = no time budget (the scan
+ *    is still bounded by `eventScanMaxLookbackBlocks`).
+ *
+ *  - `onLookbackExhausted` — what to do with the puller / consumer
+ *    checks when the scan exhausts the lookback window WITHOUT
+ *    observing a rogue in-window grant. `"skip"` (default) emits them
+ *    as `skipped:true`, preserving availability for mature contracts;
+ *    `"fail"` fails closed (422) — security-sensitive operators that
+ *    would rather reject than sign without role-holder verification
+ *    should opt into this.
  */
 export type IntentRequestBindingPolicy = {
   readonly maxDeadlineSecondsAhead: number;
@@ -49,6 +74,8 @@ export type IntentRequestBindingPolicy = {
   readonly acceptedConsumers: ReadonlyMap<number, ReadonlySet<string>>;
   readonly eventScanBlockRange: bigint;
   readonly eventScanMaxLookbackBlocks: bigint;
+  readonly eventScanDeadlineMs?: number;
+  readonly onLookbackExhausted?: "skip" | "fail";
 };
 
 /**
@@ -65,8 +92,15 @@ export type IntentRequestBindingPolicy = {
  *
  *  - `tooOld` — a factory recognised the contract but the role-events
  *    scan exhausted `eventScanMaxLookbackBlocks` without seeing
- *    deployment. The role checks remain `skipped:true` on every replay
- *    until the cache expires.
+ *    deployment. `partialHolders` is the replay of the `RolesUpdated`
+ *    events that fell INSIDE the scanned window: it may only push the
+ *    role checks toward failure (an observed non-accepted holder),
+ *    never toward a pass. The field is optional so stale cross-process
+ *    cache entries written by older package versions still
+ *    deserialise; absence is treated as an empty map. Without an
+ *    observed rogue holder the role checks follow the policy's
+ *    `onLookbackExhausted` disposition on every replay until the cache
+ *    expires.
  *
  *  - `resolved` — full data: matched factory, owner snapshot, and the
  *    fully-replayed role-holder bitfield map. Membership decisions are
@@ -79,7 +113,12 @@ export type IntentRequestBindingPolicy = {
  */
 export type A1OnChainData =
   | { readonly kind: "noFactory" }
-  | { readonly kind: "tooOld"; readonly factory: Address; readonly owner: Address }
+  | {
+      readonly kind: "tooOld";
+      readonly factory: Address;
+      readonly owner: Address;
+      readonly partialHolders?: ReadonlyMap<Address, bigint>;
+    }
   | {
       readonly kind: "resolved";
       readonly factory: Address;
@@ -133,10 +172,17 @@ export type A1Deps = {
  *     OR `eventScanMaxLookbackBlocks` is exhausted.
  *   - Each chunk is one `getLogs` filtered server-side to
  *     `[factory, requestContract]` × `[RolesUpdated, RequestCreated]`.
- *   - "Too old" outcome → role checks emitted as `skipped:true`.
+ *   - "Too old" outcome → role checks fail (422) if a rogue grant was
+ *     observed inside the scanned window, otherwise follow the
+ *     policy's `onLookbackExhausted` disposition (default: skipped).
  *
- * `allowFailure: false` means any RPC / revert surfaces as
- * `UpstreamUnavailableError` (503), per §6.6.
+ * `allowFailure: false` means a transport-level RPC failure surfaces as
+ * `UpstreamUnavailableError` (503), per §6.6. A DETERMINISTIC failure
+ * of the stage-1 reads — `owner()` / `isRequest()` reverting or
+ * returning no data because the client-supplied `requestContract` is an
+ * EOA or some unrelated contract — is instead classified as
+ * `noFactory` (an EOA is by definition not "deployed by an accepted
+ * factory"), which is cached and rolls up to a 422 check failure.
  *
  * Optional cache: when `deps.cache` is supplied the on-chain reads are
  * bypassed on hit; see {@link A1Deps} for behaviour and {@link A1OnChainData}
@@ -252,13 +298,28 @@ async function fetchA1OnChain(
       allowFailure: false,
     })) as unknown as readonly [Address, ...boolean[]];
   } catch (e) {
+    // A deterministic per-slot failure (revert / empty return data on
+    // `owner()` or `isRequest()`) means the client-supplied contract —
+    // or, for isRequest, an operator-configured factory — is not the
+    // contract we expect: an EOA cannot have been deployed by an
+    // accepted factory. Classify as `noFactory` (cached, 422) instead
+    // of polluting upstream-health signals with a 503. Transport-level
+    // failures (RPC down, timeout, the aggregate3 call itself) keep the
+    // 503 path and are never cached.
+    if (isDeterministicContractCallFailure(e, ["owner", "isRequest"])) {
+      ctx.logger.warn(
+        { err: e instanceof Error ? e.message : e, requestContract },
+        "A.1: stage 1 read reverted or returned no data; treating as noFactory",
+      );
+      return Result.ok({ kind: "noFactory" });
+    }
     ctx.logger.error(
       { err: e instanceof Error ? e.message : e, requestContract },
       "A.1: stage 1 multicall failed",
     );
     return Result.err(
       new UpstreamUnavailableError({
-        message: `request-contract read failed: ${e instanceof Error ? e.message : "unknown"}`,
+        message: "request-contract read failed upstream",
         status: 503,
       }),
     );
@@ -285,7 +346,7 @@ async function fetchA1OnChain(
     ctx.logger.error({ err: e instanceof Error ? e.message : e }, "A.1: getBlockNumber failed");
     return Result.err(
       new UpstreamUnavailableError({
-        message: `getBlockNumber failed: ${e instanceof Error ? e.message : "unknown"}`,
+        message: "getBlockNumber failed upstream",
         status: 503,
       }),
     );
@@ -300,6 +361,7 @@ async function fetchA1OnChain(
       latestBlock,
       blockRange: policy.eventScanBlockRange,
       maxLookbackBlocks: policy.eventScanMaxLookbackBlocks,
+      deadlineMs: policy.eventScanDeadlineMs,
     });
   } catch (e) {
     ctx.logger.error(
@@ -308,14 +370,19 @@ async function fetchA1OnChain(
     );
     return Result.err(
       new UpstreamUnavailableError({
-        message: `role-events scan failed: ${e instanceof Error ? e.message : "unknown"}`,
+        message: "role-events scan failed upstream",
         status: 503,
       }),
     );
   }
 
   if (scanOutcome.kind === "tooOld") {
-    return Result.ok({ kind: "tooOld", factory, owner });
+    return Result.ok({
+      kind: "tooOld",
+      factory,
+      owner,
+      partialHolders: scanOutcome.partialHolders,
+    });
   }
   return Result.ok({ kind: "resolved", factory, owner, holders: scanOutcome.holders });
 }
@@ -375,8 +442,25 @@ function evaluateA1(
   let pullerCheck: CheckEntry;
   let consumerCheck: CheckEntry;
   if (data.kind === "tooOld") {
-    pullerCheck = skipped("puller role on request contract is held only by accepted parties");
-    consumerCheck = skipped("consumer role on request contract is held only by accepted parties");
+    // The scan window did not reach deployment, so the holder map is
+    // incomplete — partial data may only strengthen the checks toward
+    // REJECTION (an in-window grant is definitively current), never
+    // toward approval. `partialHolders` is optional for compatibility
+    // with cache entries written before it existed.
+    const partial = data.partialHolders ?? new Map<Address, bigint>();
+    const disposition = policy.onLookbackExhausted ?? "skip";
+    pullerCheck = checkPartialHolders({
+      description: "puller role on request contract is held only by accepted parties",
+      holders: holdersOf(partial, ROLE_PULLER),
+      accepted: policy.acceptedPullers.get(chainId) ?? new Set<string>(),
+      disposition,
+    });
+    consumerCheck = checkPartialHolders({
+      description: "consumer role on request contract is held only by accepted parties",
+      holders: holdersOf(partial, ROLE_CONSUMER),
+      accepted: policy.acceptedConsumers.get(chainId) ?? new Set<string>(),
+      disposition,
+    });
   } else {
     pullerCheck = checkSubset({
       description: "puller role on request contract is held only by accepted parties",
@@ -416,6 +500,40 @@ function checkSubset(args: {
     return failed(description, `rogue role-holder(s): ${rogue.join(", ")}`);
   }
   return passed(description);
+}
+
+/**
+ * One-sided variant of {@link checkSubset} for the "too old" outcome,
+ * where `holders` is only the PARTIAL state observed inside the scan
+ * window. An empty set means "no evidence", not "no holder" (grants may
+ * predate the window), so it does NOT fail on emptiness and it never
+ * passes — it fails iff a non-accepted holder was observed, and
+ * otherwise follows the policy's `onLookbackExhausted` disposition.
+ */
+function checkPartialHolders(args: {
+  description: string;
+  holders: readonly Address[];
+  accepted: ReadonlySet<string>;
+  disposition: "skip" | "fail";
+}): CheckEntry {
+  const { description, holders, accepted, disposition } = args;
+  const acceptedLower = new Set([...accepted].map((s) => s.toLowerCase()));
+
+  const rogue = holders.filter((h) => !acceptedLower.has(h.toLowerCase()));
+  if (rogue.length > 0) {
+    return failed(
+      description,
+      `rogue role-holder(s) observed within the lookback window: ${rogue.join(", ")}`,
+    );
+  }
+  if (disposition === "fail") {
+    return failed(
+      description,
+      "role-events scan exhausted eventScanMaxLookbackBlocks without observing deployment; " +
+        "policy onLookbackExhausted=fail rejects unverifiable role-holder sets",
+    );
+  }
+  return skipped(description);
 }
 
 function rollupA1(

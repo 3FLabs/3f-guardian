@@ -26,6 +26,7 @@ const PACKAGES_DIR = join(REPO_ROOT, "packages");
 type PackageJson = {
   name: string;
   version: string;
+  private?: boolean;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
@@ -41,14 +42,16 @@ const DEP_FIELDS = [
 
 const manifestPaths = [
   ...new Bun.Glob("*/package.json").scanSync({ cwd: PACKAGES_DIR, absolute: true }),
-].sort();
+].toSorted();
 
 const versions = new Map<string, string>();
+const privateNames = new Set<string>();
 const manifests: Array<{ path: string; pkg: PackageJson }> = [];
 
 for (const path of manifestPaths) {
   const pkg = (await Bun.file(path).json()) as PackageJson;
   versions.set(pkg.name, pkg.version);
+  if (pkg.private === true) privateNames.add(pkg.name);
   manifests.push({ path, pkg });
 }
 
@@ -74,6 +77,24 @@ for (const { path, pkg } of manifests) {
     if (!deps) continue;
     for (const [depName, spec] of Object.entries(deps)) {
       if (typeof spec !== "string" || !spec.startsWith("workspace:")) continue;
+      if (privateNames.has(depName)) {
+        // A private workspace package never exists on npm. As a runtime /
+        // peer / optional dependency that is a real publish error — the
+        // published package would be uninstallable — so fail loudly. As a
+        // devDependency it is only ever needed inside this monorepo, so
+        // drop it from the published manifest instead of shipping a
+        // specifier that 404s for anyone installing from the tarball.
+        if (field !== "devDependencies") {
+          throw new Error(
+            `"${pkg.name}" lists private workspace package "${depName}" in ${field} — ` +
+              `it is never published, so the published manifest would be uninstallable.`,
+          );
+        }
+        delete deps[depName];
+        dirty = true;
+        console.log(`  ${pkg.name} :: ${field}.${depName}  ${spec}  →  (dropped: private package)`);
+        continue;
+      }
       const resolved = resolveSpec(spec, depName);
       deps[depName] = resolved;
       dirty = true;

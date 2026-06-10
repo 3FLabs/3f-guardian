@@ -7,8 +7,10 @@ import type { AsyncCache } from "./types.js";
  *    omitted entries live forever (until evicted by `maxEntries`).
  *  - `maxEntries`   — soft LRU bound. When the map exceeds this size on
  *    `set`, expired entries are swept first; if still over, the oldest
- *    insertion-ordered entries are evicted until the map fits. A value
- *    of `0` (default) disables the bound.
+ *    insertion-ordered entries are evicted until the map fits. Defaults
+ *    to `4096` so a zero-config cache keyed by request-supplied input
+ *    cannot grow without bound; pass an explicit `0` to disable the
+ *    bound (opt-in to unbounded growth).
  *  - `now`          — clock injection for tests. Defaults to `Date.now`.
  *    Must return milliseconds since epoch.
  */
@@ -17,6 +19,9 @@ export type InMemoryCacheOptions = {
   readonly maxEntries?: number;
   readonly now?: () => number;
 };
+
+/** Default `maxEntries` bound applied when none is configured. */
+export const DEFAULT_MAX_ENTRIES = 4096;
 
 /**
  * Single-process Map-backed `AsyncCache`. Suitable for development,
@@ -38,7 +43,7 @@ export type InMemoryCacheOptions = {
  * read just triggers a redundant on-chain fetch, never a wrong answer).
  */
 export function inMemoryCache<V>(options: InMemoryCacheOptions = {}): AsyncCache<V> {
-  const { defaultTtlMs, maxEntries = 0, now = Date.now } = options;
+  const { defaultTtlMs, maxEntries = DEFAULT_MAX_ENTRIES, now = Date.now } = options;
 
   if (defaultTtlMs !== undefined && (!Number.isFinite(defaultTtlMs) || defaultTtlMs <= 0)) {
     throw new Error(`inMemoryCache: defaultTtlMs must be > 0, got ${defaultTtlMs}`);
@@ -81,6 +86,15 @@ export function inMemoryCache<V>(options: InMemoryCacheOptions = {}): AsyncCache
 
     async set(key, value, opts) {
       const ttl = opts?.ttlMs ?? defaultTtlMs;
+      // Same predicate the constructor applies to `defaultTtlMs`. NaN
+      // would otherwise produce an immortal entry (`NaN <= now` is
+      // false in both the get-expiry check and the sweep) and 0 /
+      // negative would silently disable the cache. Throwing is safe:
+      // the AsyncCache contract requires callers to treat a throwing
+      // `set` as best-effort.
+      if (ttl !== undefined && (!Number.isFinite(ttl) || ttl <= 0)) {
+        throw new Error(`inMemoryCache: ttlMs must be > 0, got ${ttl}`);
+      }
       const expiresAt = ttl === undefined ? Number.POSITIVE_INFINITY : now() + ttl;
       // Re-insert to refresh insertion order — keeps recently-written
       // keys further from the trim eviction frontier.

@@ -27,5 +27,6 @@ export { buildIntentSwapChecks, type IntentSwapPolicy } from "./intent-swap.js";
 
 export {
   buildRequestWhitelistingChecks,
+  DEFAULT_MAX_REQUEST_CONTRACTS,
   type RequestWhitelistingPolicy,
 } from "./request-whitelisting.js";

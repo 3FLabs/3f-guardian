@@ -1,27 +1,44 @@
 import { z } from "zod";
-import { zClientName, zSemver, zUnixSecondsString, zUuid } from "./primitives.js";
+import { zClientName, zSemver } from "./primitives.js";
 
-const HEX_HMAC_RE = /^[0-9a-f]{64}$/;
-
+/**
+ * Request headers validated on every protected /v1/* route and rendered
+ * as OpenAPI `parameters`. The §6.2 client-identification headers are
+ * required; missing or malformed values yield 400 bad_request (auth
+ * still runs first — the auth derive precedes validation, so 401/403
+ * preempt header 400s per §6.6).
+ *
+ * Deliberately NOT format-validated here:
+ *  - `authorization` — enforced by the auth derive (§5.1 → 401) and
+ *    documented by the OpenAPI `bearerAuth` security scheme.
+ *  - `x-request-id` — §3.7: a malformed id is replaced with a generated
+ *    one, never rejected.
+ *  - `x-guardian-timestamp` / `x-guardian-signature` — every §5.4 HMAC
+ *    failure maps to 401 unauthenticated (§5.4.3), so their format is
+ *    checked by the auth plugin; schema validation would wrongly 400.
+ */
 export const zProtectedRequestHeaders = z
   .object({
-    authorization: z
-      .string()
-      .regex(/^Bearer .+$/i, "Authorization MUST be 'Bearer <token>'")
-      .describe("Bearer token (§5.1)."),
     "x-client-name": zClientName.describe("Identifier of the calling client application (§6.2)."),
     "x-client-version": zSemver.describe("Semver of the calling client (§6.2)."),
-    "x-request-id": zUuid
+    "x-request-id": z
+      .string()
       .optional()
       .describe("Caller-supplied UUID echoed in response. Generated if absent or malformed."),
-    "x-guardian-timestamp": zUnixSecondsString
+    "x-guardian-timestamp": z
+      .string()
       .optional()
-      .describe("Required iff token is HMAC-flagged (§5.4)."),
+      .describe(
+        "Unix seconds, decimal ASCII. Required iff token is HMAC-flagged; " +
+          "violations yield 401 (§5.4).",
+      ),
     "x-guardian-signature": z
       .string()
-      .regex(HEX_HMAC_RE, "Must be 64 lower-case hex chars")
       .optional()
-      .describe("Required iff token is HMAC-flagged (§5.4)."),
+      .describe(
+        "Lower-case hex HMAC-SHA256 over timestamp + body. Required iff " +
+          "token is HMAC-flagged; violations yield 401 (§5.4).",
+      ),
   })
   // Intentionally NOT strict: HTTP frameworks always inject extra headers
   // (host, content-length, accept-encoding...). We only validate the ones we

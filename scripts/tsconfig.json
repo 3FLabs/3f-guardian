@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // Scripts only ever run under Bun (>= 1.3), so newer-than-ES2022 lib
+    // surface (e.g. `Array#toSorted`) is safe here even though the
+    // published packages stay on the base ES2022 lib.
+    "lib": ["ESNext"],
+    "types": ["bun"]
+  },
+  "include": ["./**/*.ts"]
+}

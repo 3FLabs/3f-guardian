@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 
 import type { GuardianAbstractions } from "../abstractions.js";
 import { runSigning } from "../lib/signing.js";
+import { zProtectedRequestHeaders } from "../schemas/headers.js";
 import { pickErrorResponses, zSigningSuccess } from "../schemas/responses.js";
 import { zIntentRequestBindingBody } from "../schemas/intent-request-binding.js";
 
@@ -31,9 +32,10 @@ export function intentRequestBindingRoute(abs: GuardianAbstractions) {
         // `fn` is a string, never for plain function-typed onParse hooks.
         parse: "json",
         body: zIntentRequestBindingBody,
+        headers: zProtectedRequestHeaders,
         response: {
           200: zSigningSuccess,
-          ...pickErrorResponses([400, 401, 403, 404, 422, 429, 500, 502, 503]),
+          ...pickErrorResponses([400, 401, 403, 404, 413, 415, 422, 429, 500, 502, 503]),
         },
         detail: {
           tags: ["facility"],

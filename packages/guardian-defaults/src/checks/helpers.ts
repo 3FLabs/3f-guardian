@@ -1,3 +1,10 @@
+import {
+  AbiDecodingZeroDataError,
+  ContractFunctionExecutionError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+} from "viem";
+
 import { type CheckEntry, failed, passed, skipped, ValidationFailedError } from "@3flabs/guardian";
 
 /**
@@ -26,6 +33,36 @@ export function rollUp(
 
 /** Re-export the §6.4.1 entry constructors so consumers don't double-import. */
 export { passed, skipped, failed };
+
+/**
+ * Classifies an error thrown by a viem `multicall({ allowFailure:
+ * false })` (or `readContract`): returns `true` iff one of the named
+ * functions failed DETERMINISTICALLY — the call reverted or returned no
+ * data (the target is an EOA or an unrelated contract). Such failures
+ * are a property of the inputs, not of the upstream's health, so the
+ * caller should map them to a 422-class check failure instead of a 503.
+ *
+ * Transport-level failures never match: an RPC outage / timeout
+ * surfaces as a `ContractFunctionExecutionError` for the multicall's
+ * own `aggregate3` call (or as a bare `HttpRequestError`), whose
+ * `functionName` is not in `functionNames` and whose cause chain
+ * carries no revert / zero-data marker.
+ */
+export function isDeterministicContractCallFailure(
+  e: unknown,
+  functionNames: readonly string[],
+): boolean {
+  if (!(e instanceof ContractFunctionExecutionError)) return false;
+  if (!functionNames.includes(e.functionName)) return false;
+  return (
+    e.walk(
+      (cause) =>
+        cause instanceof AbiDecodingZeroDataError ||
+        cause instanceof ContractFunctionZeroDataError ||
+        cause instanceof ContractFunctionRevertedError,
+    ) !== null
+  );
+}
 
 /**
  * §A.* set-membership predicate. Compares case-insensitively for
@@ -113,6 +150,11 @@ export function checkSwapPriceTolerance(args: {
     referencePriceWad,
     toleranceBps,
   } = args;
+  if (!Number.isInteger(toleranceBps) || toleranceBps < 0) {
+    // BigInt() below would throw on a fractional bps, violating the
+    // never-throw contract of check evaluation — fail closed instead.
+    return failed(description, `toleranceBps must be a non-negative integer, got ${toleranceBps}`);
+  }
   if (amountB === 0n) {
     return failed(description, "leg-B amount is zero; price ratio undefined");
   }

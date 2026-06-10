@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { type Address } from "viem";
+import {
+  AbiDecodingZeroDataError,
+  ContractFunctionExecutionError,
+  HttpRequestError,
+  type Address,
+  type PublicClient,
+} from "viem";
 
 import {
   noopLogger,
@@ -9,11 +15,13 @@ import {
 } from "@3flabs/guardian";
 
 import { inMemoryCache } from "../src/cache/in-memory.js";
+import { requestAbi } from "../src/abi/request.js";
 import {
   buildIntentRequestBindingChecks,
   type A1OnChainData,
   type IntentRequestBindingPolicy,
 } from "../src/checks/intent-request-binding.js";
+import { scanRoleHolders } from "../src/checks/role-events.js";
 
 const FACTORY = "0xfaC70rfaC70rfaC70rfaC70rfaC70rfaC70rfaC0" as Address;
 const OTHER_FACTORY = "0x0000000000000000000000000000000000000aaa" as Address;
@@ -272,6 +280,149 @@ describe("buildIntentRequestBindingChecks", () => {
       const consumer = r.value.find((c) => c.description.includes("consumer role"));
       expect(puller?.skipped).toBe(true);
       expect(consumer?.skipped).toBe(true);
+    }
+  });
+
+  it("fails when a rogue grant is observed within the lookback window even though the contract is older than the lookback", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      // Deployment is older than (latest - maxLookback) → tooOld. But a
+      // rogue puller grant DID land inside the scanned window — partial
+      // data must fail the check, never silently skip.
+      latestBlock: 10_000n,
+      getLogs: ({ fromBlock, toBlock }) =>
+        fromBlock! <= 9_900n && toBlock! >= 9_900n
+          ? [
+              {
+                eventName: "RolesUpdated" as const,
+                blockNumber: 9_900n,
+                logIndex: 0,
+                args: { user: ROGUE, roles: ROLE_PULLER },
+              },
+            ]
+          : [],
+    });
+    const run = buildIntentRequestBindingChecks({ policy });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const checks = (r.error as ValidationFailedError).checks;
+      const puller = checks.find((c) => c.description.includes("puller role"));
+      expect(puller?.passed).toBe(false);
+      expect(puller?.reason).toMatch(/rogue role-holder\(s\) observed within the lookback window/);
+      expect(puller?.reason).toContain(ROGUE);
+      // No rogue consumer was observed — that check stays skipped.
+      const consumer = checks.find((c) => c.description.includes("consumer role"));
+      expect(consumer?.skipped).toBe(true);
+    }
+  });
+
+  it("keeps role checks skipped on tooOld when only ACCEPTED holders are observed in-window (partial data never passes)", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 10_000n,
+      getLogs: ({ fromBlock, toBlock }) =>
+        fromBlock! <= 9_900n && toBlock! >= 9_900n
+          ? [
+              {
+                eventName: "RolesUpdated" as const,
+                blockNumber: 9_900n,
+                logIndex: 0,
+                args: { user: PULLER, roles: ROLE_PULLER },
+              },
+            ]
+          : [],
+    });
+    const run = buildIntentRequestBindingChecks({ policy });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isOk()).toBe(true);
+    if (r.isOk()) {
+      const puller = r.value.find((c) => c.description.includes("puller role"));
+      // Skipped, NOT passed — the window may have missed earlier grants.
+      expect(puller?.skipped).toBe(true);
+    }
+  });
+
+  it("onLookbackExhausted='fail' fails closed when the contract is older than the lookback", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 10_000n,
+      getLogs: () => [],
+    });
+    const run = buildIntentRequestBindingChecks({
+      policy: { ...policy, onLookbackExhausted: "fail" },
+    });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const checks = (r.error as ValidationFailedError).checks;
+      const puller = checks.find((c) => c.description.includes("puller role"));
+      const consumer = checks.find((c) => c.description.includes("consumer role"));
+      expect(puller?.passed).toBe(false);
+      expect(puller?.reason).toMatch(/onLookbackExhausted=fail/);
+      expect(consumer?.passed).toBe(false);
+    }
+  });
+
+  it("replays a stale cached tooOld entry without partialHolders as skipped (legacy cache shape)", async () => {
+    const stub = makeClient({}); // any on-chain read would throw "unexpected multicall"
+    const cache = inMemoryCache<A1OnChainData>();
+    // Entry written by an older package version — no partialHolders.
+    await cache.set(`1:${RC.toLowerCase()}`, { kind: "tooOld", factory: FACTORY, owner: OWNER });
+    const run = buildIntentRequestBindingChecks({ policy, cache });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isOk()).toBe(true);
+    if (r.isOk()) {
+      const puller = r.value.find((c) => c.description.includes("puller role"));
+      expect(puller?.skipped).toBe(true);
+    }
+    expect(stub.multicalls.length).toBe(0);
+  });
+
+  it("treats a deterministic owner() decode failure (EOA request contract) as a cached noFactory 422, not a 503", async () => {
+    const eoaError = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: requestAbi,
+      functionName: "owner",
+      contractAddress: RC,
+    });
+    const stub = makeClient({ multicallResponses: [eoaError] });
+    const cache = inMemoryCache<A1OnChainData>();
+    const run = buildIntentRequestBindingChecks({ policy, cache });
+
+    const r1 = await run(ctx(stub.client), baseBody);
+    expect(r1.isErr()).toBe(true);
+    if (r1.isErr()) {
+      expect(r1.error).toBeInstanceOf(ValidationFailedError);
+      const factory = (r1.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("deployed by"),
+      );
+      expect(factory?.passed).toBe(false);
+    }
+    expect(stub.multicalls.length).toBe(1);
+
+    // The noFactory classification is cached — no repeat RPC.
+    const r2 = await run(ctx(stub.client), baseBody);
+    expect(r2.isErr()).toBe(true);
+    expect(stub.multicalls.length).toBe(1);
+  });
+
+  it("keeps 503 for a transport-level multicall failure (aggregate3 HttpRequestError)", async () => {
+    const transportError = new ContractFunctionExecutionError(
+      new HttpRequestError({ url: "http://localhost:8545" }),
+      { abi: requestAbi, functionName: "owner", contractAddress: RC },
+    );
+    const stub = makeClient({ multicallResponses: [transportError] });
+    const run = buildIntentRequestBindingChecks({ policy });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
+      // The client-facing envelope must not leak upstream error details.
+      const message = (r.error as UpstreamUnavailableError).message;
+      expect(message).toBe("request-contract read failed upstream");
+      expect(message).not.toContain("localhost:8545");
     }
   });
 
@@ -614,5 +765,117 @@ describe("buildIntentRequestBindingChecks", () => {
     const r = await run(ctx(stub.client), baseBody);
     expect(r.isOk()).toBe(true);
     expect(stub.multicalls.length).toBe(1);
+  });
+});
+
+describe("scanRoleHolders", () => {
+  function recordingClient(args: { onGetLogs?: () => void } = {}): {
+    client: PublicClient;
+    spans: Array<{ fromBlock: bigint; toBlock: bigint }>;
+  } {
+    const spans: Array<{ fromBlock: bigint; toBlock: bigint }> = [];
+    const client = {
+      getLogs: async (params: { fromBlock: bigint; toBlock: bigint }) => {
+        spans.push({ fromBlock: params.fromBlock, toBlock: params.toBlock });
+        args.onGetLogs?.();
+        return [];
+      },
+    } as unknown as PublicClient;
+    return { client, spans };
+  }
+
+  it("never issues a chunk wider than blockRange, including the final one (off-by-one regression)", async () => {
+    // maxLookback an exact multiple of blockRange — the configuration
+    // that used to produce a terminal blockRange+1 chunk.
+    const { client, spans } = recordingClient();
+    const outcome = await scanRoleHolders({
+      client,
+      factory: FACTORY,
+      requestContract: RC,
+      latestBlock: 10_000n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    expect(outcome.kind).toBe("tooOld");
+    expect(spans.length).toBeGreaterThan(0);
+    for (const { fromBlock, toBlock } of spans) {
+      expect(toBlock - fromBlock + 1n <= 1_000n, `chunk [${fromBlock}, ${toBlock}]`).toBe(true);
+    }
+    // Contiguous, gapless coverage of [earliestAllowed, latestBlock].
+    expect(spans[0]?.toBlock).toBe(10_000n);
+    expect(spans[spans.length - 1]?.fromBlock).toBe(5_000n);
+    for (let i = 1; i < spans.length; i++) {
+      expect(spans[i]!.toBlock).toBe(spans[i - 1]!.fromBlock - 1n);
+    }
+  });
+
+  it("returns the in-window partial holder state on tooOld", async () => {
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        fromBlock <= 9_900n && toBlock >= 9_900n
+          ? [
+              {
+                eventName: "RolesUpdated",
+                blockNumber: 9_900n,
+                logIndex: 0,
+                args: { user: ROGUE, roles: ROLE_PULLER },
+              },
+            ]
+          : [],
+    } as unknown as PublicClient;
+    const outcome = await scanRoleHolders({
+      client,
+      factory: FACTORY,
+      requestContract: RC,
+      latestBlock: 10_000n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    expect(outcome.kind).toBe("tooOld");
+    if (outcome.kind === "tooOld") {
+      expect(outcome.partialHolders.get(ROGUE)).toBe(ROLE_PULLER);
+    }
+  });
+
+  it("throws once the wall-clock budget is exhausted between chunks", async () => {
+    let clock = 0;
+    const { client } = recordingClient({
+      onGetLogs: () => {
+        clock += 10;
+      },
+    });
+    await expect(
+      scanRoleHolders({
+        client,
+        factory: FACTORY,
+        requestContract: RC,
+        latestBlock: 10_000n,
+        blockRange: 1_000n,
+        maxLookbackBlocks: 5_000n,
+        deadlineMs: 15,
+        now: () => clock,
+      }),
+    ).rejects.toThrow(/exceeded its 15ms budget/);
+  });
+
+  it("eventScanDeadlineMs surfaces as UpstreamUnavailableError through the runner", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 10_000n,
+      getLogs: () => [],
+    });
+    // Wrap the stub's getLogs with a real delay so Date.now() advances
+    // past the 1ms budget after the first chunk.
+    const inner = stub.client.getLogs.bind(stub.client);
+    (stub.client as { getLogs: typeof inner }).getLogs = async (params) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return inner(params);
+    };
+    const run = buildIntentRequestBindingChecks({
+      policy: { ...policy, eventScanDeadlineMs: 1 },
+    });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
   });
 });

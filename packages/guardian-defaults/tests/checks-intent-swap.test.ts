@@ -285,6 +285,52 @@ describe("buildIntentSwapChecks", () => {
     if (r.isErr()) expect(r.error).toBeInstanceOf(ValidationFailedError);
   });
 
+  it("passes a 1-wei deviation on a small leg (tolerance floored at 1 wei when bps > 0)", async () => {
+    // expected = 100 * 1001 / 1001 = 100. 1 bp of 100 floors to 0 —
+    // the 1-wei floor must absorb the documented mulDiv rounding.
+    const stub = makeClient([
+      factoryReads({ aIsPm: true, bIsPm: false }),
+      pmReads({ totalAssets: 1000n, totalSupply: 1000n, virtualShareOffset: 1n }),
+    ]);
+    const body = {
+      ...baseBody,
+      legs: [
+        { intent: { id: "1" }, asset: PM, amount: "100" },
+        { intent: { id: "2" }, asset: DEBT, amount: "101" }, // 1 wei off
+      ],
+    };
+    const r = await buildIntentSwapChecks({ policy })(ctx(stub.client), body);
+    expect(r.isOk()).toBe(true);
+  });
+
+  it("applies no floor when swapPriceToleranceBps is 0 (strict equality)", async () => {
+    const stub = makeClient([
+      factoryReads({ aIsPm: true, bIsPm: false }),
+      pmReads({ totalAssets: 1000n, totalSupply: 1000n, virtualShareOffset: 1n }),
+    ]);
+    const body = {
+      ...baseBody,
+      legs: [
+        { intent: { id: "1" }, asset: PM, amount: "100" },
+        { intent: { id: "2" }, asset: DEBT, amount: "101" },
+      ],
+    };
+    const r = await buildIntentSwapChecks({ policy: { ...policy, swapPriceToleranceBps: 0 } })(
+      ctx(stub.client),
+      body,
+    );
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(ValidationFailedError);
+  });
+
+  it("throws at construction for a fractional or negative swapPriceToleranceBps", () => {
+    for (const bad of [0.5, -1, Number.NaN]) {
+      expect(() =>
+        buildIntentSwapChecks({ policy: { ...policy, swapPriceToleranceBps: bad } }),
+      ).toThrow(TypeError);
+    }
+  });
+
   it("fails when no PM factories are configured for the chain", async () => {
     const policyEmpty: IntentSwapPolicy = { ...policy, acceptedPmFactories: new Map() };
     const stub = makeClient([]); // no multicall expected

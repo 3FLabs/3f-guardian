@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type Address } from "viem";
+import { ContractFunctionExecutionError, ContractFunctionZeroDataError, type Address } from "viem";
 
 import {
   noopLogger,
@@ -9,9 +9,11 @@ import {
 } from "@3flabs/guardian";
 
 import { inMemoryCache } from "../src/cache/in-memory.js";
+import { whitelistBookAbi } from "../src/abi/whitelist-book.js";
 import type { A1OnChainData } from "../src/checks/intent-request-binding.js";
 import {
   buildRequestWhitelistingChecks,
+  DEFAULT_MAX_REQUEST_CONTRACTS,
   type RequestWhitelistingPolicy,
 } from "../src/checks/request-whitelisting.js";
 
@@ -456,5 +458,161 @@ describe("buildRequestWhitelistingChecks", () => {
     // Book read happens (request-wide) but no new RC1 multicall / logs.
     expect(stub.multicalls.length).toBe(3);
     expect(stub.getLogsCalls).toBe(1);
+  });
+
+  it("rejects an oversized requestContracts batch before any on-chain read (default cap)", async () => {
+    const manyContracts = Array.from(
+      { length: DEFAULT_MAX_REQUEST_CONTRACTS + 1 },
+      (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}` as Address,
+    );
+    const stub = makeClient({}); // any RPC would throw "unexpected multicall"
+    const r = await buildRequestWhitelistingChecks({
+      policy,
+      guardianSigner: GUARDIAN,
+    })(ctx(stub.client), {
+      chainId: 1,
+      whitelistBook: BOOK,
+      operation: "whitelist",
+      requestContracts: manyContracts,
+      nonce: "100",
+      deadline: 1_700_000_500,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const batch = (r.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("batch size"),
+      );
+      expect(batch?.passed).toBe(false);
+      expect(batch?.reason).toMatch(/exceeds the maximum of 50/);
+    }
+    expect(stub.multicalls.length).toBe(0);
+    expect(stub.getLogsCalls).toBe(0);
+    expect(stub.getBlockNumberCalls).toBe(0);
+  });
+
+  it("applies the batch cap to unwhitelist operations too", async () => {
+    const manyContracts = Array.from(
+      { length: 3 },
+      (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}` as Address,
+    );
+    const stub = makeClient({});
+    const r = await buildRequestWhitelistingChecks({
+      policy: { ...policy, maxRequestContracts: 2 },
+      guardianSigner: GUARDIAN,
+    })(ctx(stub.client), {
+      chainId: 1,
+      whitelistBook: BOOK,
+      operation: "unwhitelist",
+      requestContracts: manyContracts,
+      nonce: "100",
+      deadline: 1_700_000_500,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(ValidationFailedError);
+    expect(stub.multicalls.length).toBe(0);
+  });
+
+  it("throws at construction for a non-positive or fractional maxRequestContracts", () => {
+    for (const bad of [0, -1, 1.5]) {
+      expect(() =>
+        buildRequestWhitelistingChecks({
+          policy: { ...policy, maxRequestContracts: bad },
+          guardianSigner: GUARDIAN,
+        }),
+      ).toThrow(TypeError);
+    }
+  });
+
+  it("fails 422 before any RPC when the whitelist book is off the accepted-books policy", async () => {
+    const stub = makeClient({});
+    const r = await buildRequestWhitelistingChecks({
+      policy: {
+        ...policy,
+        acceptedWhitelistBooks: new Map([[1, new Set<string>([RC1])]]), // BOOK not accepted
+      },
+      guardianSigner: GUARDIAN,
+    })(ctx(stub.client), {
+      chainId: 1,
+      whitelistBook: BOOK,
+      operation: "whitelist",
+      requestContracts: [RC1],
+      nonce: "100",
+      deadline: 1_700_000_500,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const checks = (r.error as ValidationFailedError).checks;
+      const book = checks.find((c) => c.description.includes("accepted-books"));
+      expect(book?.passed).toBe(false);
+      // Nonce entries are present but skipped — the book was never read.
+      expect(checks.filter((c) => c.skipped && c.description.includes("nonce")).length).toBe(3);
+    }
+    expect(stub.multicalls.length).toBe(0);
+    expect(stub.getLogsCalls).toBe(0);
+  });
+
+  it("passes through with a passed book check when the book is on the accepted-books policy", async () => {
+    const stub = makeClient({
+      multicallResponses: [
+        [OWNER, true],
+        [10n, false],
+      ],
+      getLogs: () => happyEvents(RC1),
+      latestBlock: 5_500n,
+    });
+    const r = await buildRequestWhitelistingChecks({
+      policy: {
+        ...policy,
+        acceptedWhitelistBooks: new Map([[1, new Set<string>([BOOK])]]),
+      },
+      guardianSigner: GUARDIAN,
+    })(ctx(stub.client), {
+      chainId: 1,
+      whitelistBook: BOOK,
+      operation: "whitelist",
+      requestContracts: [RC1],
+      nonce: "100",
+      deadline: 1_700_000_500,
+    });
+    expect(r.isOk()).toBe(true);
+    if (r.isOk()) {
+      const book = r.value.find((c) => c.description.includes("accepted-books"));
+      expect(book?.passed).toBe(true);
+      expect(book?.skipped).toBe(false);
+    }
+  });
+
+  it("treats a deterministic book read failure (EOA book) as a 422 check failure, not a 503", async () => {
+    const eoaBookError = new ContractFunctionExecutionError(
+      new ContractFunctionZeroDataError({ functionName: "validatorNonceFloor" }),
+      {
+        abi: whitelistBookAbi,
+        functionName: "validatorNonceFloor",
+        args: [GUARDIAN],
+        contractAddress: BOOK,
+      },
+    );
+    const stub = makeClient({ multicallResponses: [eoaBookError] });
+    const r = await buildRequestWhitelistingChecks({
+      policy,
+      guardianSigner: GUARDIAN,
+    })(ctx(stub.client), {
+      chainId: 1,
+      whitelistBook: BOOK,
+      operation: "unwhitelist",
+      requestContracts: [RC1],
+      nonce: "100",
+      deadline: 1_700_000_500,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const checks = (r.error as ValidationFailedError).checks;
+      const book = checks.find((c) => c.description.includes("per-validator nonce state"));
+      expect(book?.passed).toBe(false);
+      expect(checks.filter((c) => c.skipped && c.description.includes("nonce")).length).toBe(3);
+    }
   });
 });

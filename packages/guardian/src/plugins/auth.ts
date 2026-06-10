@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 
 import type { EndpointScope, GuardianAbstractions, TokenInfo } from "../abstractions.js";
 import { ForbiddenError, RateLimitedError, UnauthenticatedError } from "../errors/tagged.js";
+import { resolveGuardianTimeouts, withAbstractionDeadline } from "../lib/deadline.js";
 import { computeBodyHmacHex, timingSafeEqualHex } from "../lib/hmac.js";
 import { nowUnixSeconds } from "../lib/time.js";
 import { PROTECTED_RESPONSE_HEADERS } from "../schemas/headers.js";
@@ -26,20 +27,27 @@ const HMAC_TIMESTAMP_TOLERANCE_SECONDS = 60;
  *    is not a secret.
  *  - `accountRateLimit` is invoked AFTER auth succeeds (otherwise an
  *    unauthenticated attacker could probe rate-limit state).
+ *  - `authenticate` / `accountRateLimit` are bounded by the configured
+ *    deadlines so a hung token store or rate-limit backend yields a
+ *    503 instead of hanging the request forever.
  */
 export function makeAuthPlugin(abs: GuardianAbstractions) {
+  const timeouts = resolveGuardianTimeouts(abs.timeouts);
   return (requiredScope: EndpointScope) =>
     new Elysia({ name: `guardian:auth:${requiredScope}` })
       // Bring rawBody (§5.4), requestId (§3.7), and the request logger
       // into scope. Plugins dedupe by `name`, so installing them here AND
       // at the server level is safe.
-      .use(rawBodyPlugin)
+      .use(rawBodyPlugin(abs.maxBodyBytes))
       .use(requestIdPlugin)
       .use(loggerPlugin(abs.logger))
       // `.derive` runs in the transform phase, BEFORE body/header
       // validation. We need 401 / 403 to take priority over body 400s
       // (matches §6.6 ordering: auth comes first), so the auth check
-      // must run pre-validation.
+      // must run pre-validation. Note the parse phase precedes this
+      // derive, so parse-level rejections (malformed JSON → 400,
+      // oversized body → 413) are emitted before auth runs — the §6.6
+      // ordering applies to validation-phase 400s only.
       .derive({ as: "scoped" }, async ({ request, rawBody, set, logger }) => {
         const authz = request.headers.get("authorization");
         if (!authz || !authz.toLowerCase().startsWith("bearer ")) {
@@ -56,7 +64,10 @@ export function makeAuthPlugin(abs: GuardianAbstractions) {
           });
         }
 
-        const authResult = await abs.authenticate(token);
+        const authResult = await withAbstractionDeadline(
+          (signal) => abs.authenticate(token, { signal }),
+          { ms: timeouts.authenticateMs, abstraction: "authenticate", logger },
+        );
         if (authResult.isErr()) {
           logger.warn({ scope: requiredScope }, "auth: token rejected by authenticate()");
           throw authResult.error;
@@ -81,8 +92,12 @@ export function makeAuthPlugin(abs: GuardianAbstractions) {
           });
         }
 
-        if (abs.accountRateLimit) {
-          const window = await abs.accountRateLimit(tokenInfo);
+        const accountRateLimit = abs.accountRateLimit;
+        if (accountRateLimit) {
+          const window = await withAbstractionDeadline(
+            (signal) => accountRateLimit(tokenInfo, { signal }),
+            { ms: timeouts.rateLimitMs, abstraction: "accountRateLimit", logger: requestLogger },
+          );
           if (window.isErr()) {
             const e = window.error;
             if (e instanceof RateLimitedError) {

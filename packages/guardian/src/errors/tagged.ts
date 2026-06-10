@@ -10,6 +10,7 @@ const GUARDIAN_TAGS = new Set<string>([
   "Forbidden",
   "BadRequest",
   "UnsupportedMediaType",
+  "PayloadTooLarge",
   "UnsupportedChain",
   "NotFound",
   "StateConflict",
@@ -55,6 +56,15 @@ export class UnsupportedMediaTypeError extends TaggedError("UnsupportedMediaType
   message: string;
 }>() {}
 
+/**
+ * Request body exceeds the shell's `maxBodyBytes` cap. Maps to 413; the
+ * §6.5 envelope reuses the `bad_request` code (like 415, §6.5 defines no
+ * dedicated machine-readable code for this status).
+ */
+export class PayloadTooLargeError extends TaggedError("PayloadTooLarge")<{
+  message: string;
+}>() {}
+
 /** chainId not in supportedChains. Maps to 400 unsupported_chain. */
 export class UnsupportedChainError extends TaggedError("UnsupportedChain")<{
   message: string;
@@ -94,10 +104,15 @@ export class InternalError extends TaggedError("InternalError")<{
   message: string;
 }>() {}
 
-/** RPC or other dependency unavailable. Maps to 502 / 503. */
+/**
+ * RPC or other dependency unavailable. Maps to 502 / 503. When
+ * `retryAfterSeconds` is set, the response carries a `Retry-After`
+ * header with that value (§6.3).
+ */
 export class UpstreamUnavailableError extends TaggedError("UpstreamUnavailable")<{
   message: string;
   status: 502 | 503;
+  retryAfterSeconds?: number;
 }>() {}
 
 /**
@@ -111,6 +126,7 @@ export type GuardianError =
   | ForbiddenError
   | BadRequestError
   | UnsupportedMediaTypeError
+  | PayloadTooLargeError
   | UnsupportedChainError
   | NotFoundError
   | StateConflictError

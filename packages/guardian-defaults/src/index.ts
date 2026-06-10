@@ -12,23 +12,29 @@
  * tree-shaking remains effective (`./logger`, `./rate-limit`, `./checks`).
  */
 
-export { pinoLogger, type PinoLoggerOptions } from "./logger/pino.js";
+export { DEFAULT_REDACT_PATHS, pinoLogger, type PinoLoggerOptions } from "./logger/pino.js";
 
 export { inMemoryRateLimiter, type RateLimiterOptions } from "./rate-limit/in-memory.js";
 export {
   inMemoryRateLimitStore,
+  type RateLimitDecision,
   type RateLimitState,
   type RateLimitStore,
 } from "./rate-limit/store.js";
 
 export { type AsyncCache } from "./cache/types.js";
-export { inMemoryCache, type InMemoryCacheOptions } from "./cache/in-memory.js";
+export {
+  DEFAULT_MAX_ENTRIES,
+  inMemoryCache,
+  type InMemoryCacheOptions,
+} from "./cache/in-memory.js";
 
 export {
   buildIntentFundBindingChecks,
   buildIntentRequestBindingChecks,
   buildIntentSwapChecks,
   buildRequestWhitelistingChecks,
+  DEFAULT_MAX_REQUEST_CONTRACTS,
   checkDeadline,
   checkMembership,
   checkNonceWindow,

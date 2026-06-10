@@ -1,5 +1,5 @@
 import { Result } from "better-result";
-import { type Address, zeroAddress } from "viem";
+import { ContractFunctionExecutionError, type Address, zeroAddress } from "viem";
 
 import {
   type CheckEntry,
@@ -10,7 +10,15 @@ import {
 } from "@3flabs/guardian";
 
 import { facilityAbi, fundAbi } from "../abi/index.js";
-import { checkDeadline, checkMembership, failed, passed, rollUp, skipped } from "./helpers.js";
+import {
+  checkDeadline,
+  checkMembership,
+  failed,
+  isDeterministicContractCallFailure,
+  passed,
+  rollUp,
+  skipped,
+} from "./helpers.js";
 import type { CheckRunner, CheckRunnerError } from "./types.js";
 
 /**
@@ -44,9 +52,14 @@ export type IntentFundBindingPolicy = {
  *
  * Stage 1 multicall reads `fund.owner()` and `facility.getIntent(id)` in
  * a single round-trip — viem decodes each call to its ABI return type
- * via the `as const` contracts tuple. `allowFailure: false` is used so
- * that any single revert / RPC failure throws and surfaces as
- * `UpstreamUnavailableError` (503), which is what the spec calls for.
+ * via the `as const` contracts tuple. With `allowFailure: false` a
+ * transport-level RPC failure throws and surfaces as
+ * `UpstreamUnavailableError` (503), per §6.6. A DETERMINISTIC failure of
+ * either read — `owner()` / `getIntent()` reverting or returning no data
+ * because the client-supplied `fundContract` or `facility` is an EOA or
+ * some unrelated contract — is instead a property of the request: it
+ * fails the 422-class owner check (the read cannot prove an accepted
+ * owner) and rolls up to `ValidationFailedError`.
  *
  * Per §6.6.1 the runner reports 422 if any 422-class check fails, even
  * when the 409 check (intent-has-no-current-fund) also fails. The 409
@@ -122,13 +135,44 @@ export function buildIntentFundBindingChecks(deps: {
         allowFailure: false,
       });
     } catch (e) {
+      // A deterministic per-slot failure (revert / empty return data on
+      // `owner()` or `getIntent()`) means a client-supplied address —
+      // `fundContract` or `facility` — is an EOA or some unrelated
+      // contract: a property of the request, not of the upstream's
+      // health. Fail the 422-class owner check instead of reporting a
+      // 503. Transport-level failures (RPC down, timeout, the aggregate3
+      // call itself) keep the 503 path.
+      if (isDeterministicContractCallFailure(e, ["owner", "getIntent"])) {
+        ctx.logger.warn(
+          { err: e instanceof Error ? e.message : e, fundContract, facility, intentId: intent.id },
+          "A.2: stage 1 read reverted or returned no data; treating as check failure",
+        );
+        const ownerReadFailed =
+          e instanceof ContractFunctionExecutionError && e.functionName === "owner";
+        const all: CheckEntry[] = [
+          deadlineCheck,
+          fundOnList,
+          failed(
+            "fund contract owner is on the accepted-owners list",
+            ownerReadFailed
+              ? `fund contract ${fundContract} did not answer owner() ` +
+                  "(EOA or non-Ownable contract); owner could not be read deterministically"
+              : `facility ${facility} did not answer getIntent(${intent.id}) ` +
+                  "(EOA or non-facility contract); fund owner could not be read deterministically",
+          ),
+          skipped("intent has no currently bound fund"),
+          skipped("fund holds DEPOSITOR_ROLE for the facility"),
+        ];
+        const r = rollUp(all, "Appendix A.2 checks failed");
+        return r.ok ? Result.ok(r.checks) : Result.err(r.error);
+      }
       ctx.logger.error(
         { err: e instanceof Error ? e.message : e, fundContract, facility, intentId: intent.id },
         "A.2: stage 1 multicall failed",
       );
       return Result.err(
         new UpstreamUnavailableError({
-          message: `fund-binding read failed: ${e instanceof Error ? e.message : "unknown"}`,
+          message: "fund-binding read failed upstream",
           status: 503,
         }),
       );

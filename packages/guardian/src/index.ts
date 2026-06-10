@@ -13,6 +13,7 @@
  */
 export { buildGuardianServer, type GuardianServer } from "./server.js";
 export type {
+  AbstractionCallOptions,
   EndpointScope,
   GuardianAbstractions,
   GuardianMetadata,
@@ -30,6 +31,10 @@ export type {
 } from "./abstractions.js";
 export { ENDPOINT_SCOPES } from "./abstractions.js";
 
+// Per-call deadlines for host abstractions and the shell's body-size cap.
+export { DEFAULT_GUARDIAN_TIMEOUTS, type GuardianTimeouts } from "./lib/deadline.js";
+export { DEFAULT_MAX_BODY_BYTES } from "./plugins/raw-body.js";
+
 // Tagged error classes — implementers construct these inside their
 // abstraction implementations to drive HTTP status mapping.
 export {
@@ -37,6 +42,7 @@ export {
   ForbiddenError,
   InternalError,
   NotFoundError,
+  PayloadTooLargeError,
   RateLimitedError,
   StateConflictError,
   UnauthenticatedError,

@@ -1,1 +1,1 @@
-export { pinoLogger, type PinoLoggerOptions } from "./pino.js";
+export { DEFAULT_REDACT_PATHS, pinoLogger, type PinoLoggerOptions } from "./pino.js";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hashTypedData, recoverTypedDataAddress, type Address, type Hex } from "viem";
+import { getAddress, hashTypedData, recoverTypedDataAddress, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import {
@@ -205,6 +205,40 @@ describe("buildIntentSwapTypedData", () => {
     const recovered = await recoverTypedDataAddress({ ...typedData, signature });
     expect(recovered.toLowerCase()).toBe(account.address.toLowerCase());
   });
+
+  it("throws when domain.verifyingContract does not equal body.facility", () => {
+    // Same fail-closed guard as the binding builders: a domain resolved for
+    // one contract must never sign a body referencing another.
+    expect(() =>
+      buildIntentSwapTypedData({
+        domain: { ...FACILITY_DOMAIN, verifyingContract: BOOK },
+        body: {
+          ...baseBody,
+          legs: [
+            { intent: { id: "1" }, asset: TOKEN_A, amount: "100" },
+            { intent: { id: "2" }, asset: TOKEN_B, amount: "200" },
+          ],
+        },
+      }),
+    ).toThrow("buildIntentSwapTypedData: domain.verifyingContract must equal body.facility");
+  });
+
+  it("accepts a case-insensitive facility match", () => {
+    const checksummed = getAddress(TOKEN_A); // mixed-case EIP-55 form of the lower-case address
+    expect(() =>
+      buildIntentSwapTypedData({
+        domain: { ...FACILITY_DOMAIN, verifyingContract: checksummed },
+        body: {
+          ...baseBody,
+          facility: TOKEN_A,
+          legs: [
+            { intent: { id: "1" }, asset: TOKEN_A, amount: "100" },
+            { intent: { id: "2" }, asset: TOKEN_B, amount: "200" },
+          ],
+        },
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe("buildRequestWhitelistingTypedData", () => {
@@ -270,6 +304,40 @@ describe("buildRequestWhitelistingTypedData", () => {
       body: rest,
     });
     expect(typedData.primaryType).toBe("UnwhitelistRequest");
+  });
+
+  it("whitelist builder throws when domain.verifyingContract does not equal body.whitelistBook", () => {
+    expect(() =>
+      buildWhitelistRequestTypedData({
+        domain: { ...BOOK_DOMAIN, verifyingContract: FACILITY },
+        validator: account.address,
+        body: baseBody,
+      }),
+    ).toThrow(
+      "buildWhitelistRequestTypedData: domain.verifyingContract must equal body.whitelistBook",
+    );
+  });
+
+  it("unwhitelist builder throws when domain.verifyingContract does not equal body.whitelistBook", () => {
+    expect(() =>
+      buildUnwhitelistRequestTypedData({
+        domain: { ...BOOK_DOMAIN, verifyingContract: FACILITY },
+        validator: account.address,
+        body: baseBody,
+      }),
+    ).toThrow(
+      "buildUnwhitelistRequestTypedData: domain.verifyingContract must equal body.whitelistBook",
+    );
+  });
+
+  it("union builder inherits the verifyingContract guard via the per-operation builders", () => {
+    expect(() =>
+      buildRequestWhitelistingTypedData({
+        domain: { ...BOOK_DOMAIN, verifyingContract: FACILITY },
+        validator: account.address,
+        body: { ...baseBody, operation: "whitelist" },
+      }),
+    ).toThrow("domain.verifyingContract must equal body.whitelistBook");
   });
 });
 

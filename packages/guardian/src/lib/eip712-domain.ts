@@ -1,7 +1,13 @@
 import { Result } from "better-result";
-import type { Address, PublicClient } from "viem";
+import {
+  BaseError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+  type Address,
+  type PublicClient,
+} from "viem";
 
-import { UpstreamUnavailableError } from "../errors/tagged.js";
+import { NotFoundError, UpstreamUnavailableError } from "../errors/tagged.js";
 import type { Logger } from "./logger.js";
 
 /**
@@ -68,9 +74,17 @@ export function eip712DomainCacheKey(chainId: number, verifyingContract: Address
 
 /**
  * Reads `eip712Domain()` (ERC-5267) from `verifyingContract` and
- * returns `{ name, version }`. On RPC failure, an
- * `UpstreamUnavailableError` (503) is returned so the caller can map
- * to §6.6 directly.
+ * returns `{ name, version }`.
+ *
+ * Read failures are discriminated on viem's cause chain:
+ *  - deterministic, caller-caused failures — address with no code,
+ *    contract without ERC-5267, revert — return `NotFoundError` (404,
+ *    "unresolvable on-chain reference"), since the verifying contract
+ *    comes verbatim from the request body and retrying cannot succeed;
+ *  - transport-level failures (HTTP, timeout, RPC) return
+ *    `UpstreamUnavailableError` (503, retryable).
+ * Neither client-facing message embeds the raw viem error text (it can
+ * contain RPC URLs); the full error is logged via `logger` instead.
  *
  * If `cache` is supplied, a hit short-circuits the read; misses are
  * back-filled with the optional `ttlMs` (best-effort — a thrown cache
@@ -85,7 +99,7 @@ export async function fetchEip712DomainNameVersion(args: {
   cache?: Eip712DomainCache;
   ttlMs?: number;
   logger?: Logger;
-}): Promise<Result<Eip712DomainNameVersion, UpstreamUnavailableError>> {
+}): Promise<Result<Eip712DomainNameVersion, UpstreamUnavailableError | NotFoundError>> {
   const { client, chainId, verifyingContract, cache, ttlMs, logger } = args;
   const key = eip712DomainCacheKey(chainId, verifyingContract);
 
@@ -111,11 +125,35 @@ export async function fetchEip712DomainNameVersion(args: {
     });
     result = { name, version };
   } catch (e) {
+    logger?.warn(
+      { err: e instanceof Error ? e.message : String(e), chainId, verifyingContract },
+      "eip712Domain() read failed",
+    );
+    // viem wraps everything (including transport failures) in
+    // ContractFunctionExecutionError, so walk the cause chain: only
+    // no-code / missing-function / revert causes are deterministic and
+    // caller-attributable.
+    const deterministic =
+      e instanceof BaseError
+        ? e.walk(
+            (cause) =>
+              cause instanceof ContractFunctionZeroDataError ||
+              cause instanceof ContractFunctionRevertedError,
+          )
+        : null;
+    if (deterministic) {
+      return Result.err(
+        new NotFoundError({
+          message:
+            `Verifying contract at ${verifyingContract} does not implement ` +
+            "ERC-5267 eip712Domain().",
+          details: { chainId, verifyingContract },
+        }),
+      );
+    }
     return Result.err(
       new UpstreamUnavailableError({
-        message: `eip712Domain() read failed at ${verifyingContract}: ${
-          e instanceof Error ? e.message : "unknown"
-        }`,
+        message: `eip712Domain() read failed at ${verifyingContract}.`,
         status: 503,
       }),
     );

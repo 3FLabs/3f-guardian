@@ -3,7 +3,7 @@ import { Result } from "better-result";
 import { type GuardianError, RateLimitedError, type TokenInfo } from "@3flabs/guardian";
 import type { RateLimitWindow } from "@3flabs/guardian";
 
-import { inMemoryRateLimitStore, type RateLimitStore } from "./store.js";
+import { inMemoryRateLimitStore, type RateLimitDecision, type RateLimitStore } from "./store.js";
 
 /**
  * Configuration for the default rate limiter.
@@ -39,16 +39,22 @@ export type RateLimiterOptions = {
  *   - The window opens on the first request for a token and is `windowSeconds` wide.
  *   - The window resets when the wall clock crosses `resetUnixSeconds`.
  *   - When `count >= limit`, returns `Err(RateLimitedError)` with
- *     `retryAfterSeconds = max(1, resetUnixSeconds - now)` (rounded
- *     up to the nearest second so callers never get a `Retry-After: 0`).
+ *     `retryAfterSeconds = max(1, ceil(resetUnixSeconds - now))` (rounded
+ *     up to the nearest second so callers never get a `Retry-After: 0`
+ *     or a fractional, RFC-9110-invalid `Retry-After`).
  *
  * On success, returns a populated `RateLimitWindow` so the auth plugin
  * can emit `X-RateLimit-Limit / -Remaining / -Reset` (§6.3).
  *
- * Single-process only by default. For multi-replica deployments
- * substitute a transactional `RateLimitStore` (Redis with
- * `INCR + EXPIRE`, or Cloudflare Durable Object), since the read /
- * write here is not atomic across processes.
+ * Atomicity: when the store implements the optional `consume`, the
+ * check-and-increment is delegated to it in a single atomic operation —
+ * the bundled `inMemoryRateLimitStore` does so synchronously, making
+ * concurrent in-process bursts unable to over-admit. For stores that
+ * only expose `read` / `write`, the limiter serialises the
+ * read-modify-write per key with an in-process mutex; that fallback is
+ * single-process safe only. For multi-replica deployments substitute a
+ * store whose `consume` is transactional (Redis with `INCR + EXPIRE`,
+ * or a Cloudflare Durable Object).
  */
 export function inMemoryRateLimiter(options: RateLimiterOptions) {
   const { limit, windowSeconds, now = Date.now, keyOf = (t: TokenInfo) => t.tokenId } = options;
@@ -63,39 +69,74 @@ export function inMemoryRateLimiter(options: RateLimiterOptions) {
     throw new Error(`inMemoryRateLimiter: windowSeconds must be > 0, got ${windowSeconds}`);
   }
 
+  // Per-key serialisation for stores that only expose `read` / `write`:
+  // the read-modify-write in `readModifyWrite` spans two awaits, so
+  // without a mutex two concurrent requests for the same key would both
+  // read the same stale count and both pass. Entries are dropped once
+  // their chain drains so key cardinality never leaks memory, and the
+  // chain advances on rejection too (`.then(task, task)`) so one failed
+  // store call cannot poison the key forever.
+  const chains = new Map<string, Promise<void>>();
+  const withKeyLock = <T>(key: string, task: () => Promise<T>): Promise<T> => {
+    const tail = chains.get(key) ?? Promise.resolve();
+    const next = tail.then(task, task);
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    chains.set(key, settled);
+    void settled.then(() => {
+      if (chains.get(key) === settled) chains.delete(key);
+    });
+    return next;
+  };
+
+  const readModifyWrite = (key: string, nowSec: number): Promise<RateLimitDecision> =>
+    withKeyLock(key, async () => {
+      const previous = await store.read(key);
+      if (!previous || previous.resetUnixSeconds <= nowSec) {
+        // First request in a new window. `Math.ceil` keeps the reset
+        // boundary on a whole second even for fractional windows.
+        const state = { count: 1, resetUnixSeconds: Math.ceil(nowSec + windowSeconds) };
+        await store.write(key, state);
+        return { allowed: true, ...state };
+      }
+      if (previous.count >= limit) {
+        return {
+          allowed: false,
+          count: previous.count,
+          resetUnixSeconds: previous.resetUnixSeconds,
+        };
+      }
+      const state = { count: previous.count + 1, resetUnixSeconds: previous.resetUnixSeconds };
+      await store.write(key, state);
+      return { allowed: true, ...state };
+    });
+
   return async (token: TokenInfo): Promise<Result<RateLimitWindow, GuardianError>> => {
     const key = keyOf(token);
     const nowSec = Math.floor(now() / 1000);
-    const previous = await store.read(key);
 
-    let count: number;
-    let resetUnixSeconds: number;
+    const decision = store.consume
+      ? await store.consume(key, limit, windowSeconds, nowSec)
+      : await readModifyWrite(key, nowSec);
 
-    if (!previous || previous.resetUnixSeconds <= nowSec) {
-      // First request in a new window.
-      count = 1;
-      resetUnixSeconds = nowSec + windowSeconds;
-    } else if (previous.count >= limit) {
-      // Window still open and budget exhausted.
-      const retryAfterSeconds = Math.max(1, previous.resetUnixSeconds - nowSec);
+    if (!decision.allowed) {
+      // `Math.ceil` guards against custom stores returning fractional
+      // reset boundaries — Retry-After must be integral per RFC 9110.
+      const retryAfterSeconds = Math.max(1, Math.ceil(decision.resetUnixSeconds - nowSec));
       return Result.err(
         new RateLimitedError({
           message: "Per-token rate limit exceeded",
           retryAfterSeconds,
         }),
       );
-    } else {
-      // Window still open, budget remaining.
-      count = previous.count + 1;
-      resetUnixSeconds = previous.resetUnixSeconds;
     }
-
-    await store.write(key, { count, resetUnixSeconds });
 
     return Result.ok({
       limit,
-      remaining: Math.max(0, limit - count),
-      resetUnixSeconds,
+      remaining: Math.max(0, limit - decision.count),
+      resetUnixSeconds: Math.ceil(decision.resetUnixSeconds),
     });
   };
 }

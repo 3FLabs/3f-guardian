@@ -4,15 +4,19 @@ import type {
   TokenInfo,
   ValidateAndSign,
 } from "../abstractions.js";
+import { resolveGuardianTimeouts, withAbstractionDeadline } from "./deadline.js";
 import type { Logger } from "./logger.js";
 import { unwrapOrThrow } from "./result.js";
 
 /**
  * Shared pre-amble for every signing endpoint:
- *   1. Resolve the chain client (yields `unsupported_chain` if absent).
- *   2. Build a fresh `SigningContext` snapshotted at request time.
- *   3. Hand off to the abstraction's validate-and-sign function.
- *   4. Throw on `Err` so the global error handler maps it to §6.5.
+ *   1. Consult `abs.probeUpstream` (when supplied) so a host that already
+ *      knows its upstream is down fails fast with 502/503.
+ *   2. Resolve the chain client (yields `unsupported_chain` if absent).
+ *   3. Build a fresh `SigningContext` snapshotted at request time.
+ *   4. Hand off to the abstraction's validate-and-sign function, bounded
+ *      by the `signMs` deadline (503 on expiry).
+ *   5. Throw on `Err` so the global error handler maps it to §6.5.
  *
  * Centralises the §6.4 / §6.6 plumbing so each route file is just a
  * wiring of body schema → abstraction.
@@ -26,15 +30,25 @@ export async function runSigning<TBody extends { chainId: number }, TSuccess, TE
   logger: Logger;
 }): Promise<TSuccess> {
   const { abs, sign, body, requestId, tokenInfo, logger } = args;
+  if (abs.probeUpstream) unwrapOrThrow(abs.probeUpstream());
   const client = unwrapOrThrow(abs.getChainClient(body.chainId));
-  const ctx: SigningContext = {
-    chainId: body.chainId,
-    client,
-    requestId,
-    tokenId: tokenInfo.tokenId,
-    now: new Date(),
-    signTypedData: abs.signTypedData,
-    logger: logger.child({ chainId: body.chainId }),
-  };
-  return unwrapOrThrow(await sign(ctx, body));
+  const timeouts = resolveGuardianTimeouts(abs.timeouts);
+  const signLogger = logger.child({ chainId: body.chainId });
+  const result = await withAbstractionDeadline(
+    (signal) => {
+      const ctx: SigningContext = {
+        chainId: body.chainId,
+        client,
+        requestId,
+        tokenId: tokenInfo.tokenId,
+        now: new Date(),
+        signTypedData: abs.signTypedData,
+        logger: signLogger,
+        signal,
+      };
+      return sign(ctx, body);
+    },
+    { ms: timeouts.signMs, abstraction: "sign", logger: signLogger },
+  );
+  return unwrapOrThrow(result);
 }

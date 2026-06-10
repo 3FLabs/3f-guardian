@@ -68,11 +68,25 @@ export type IntentSwapPolicy = {
  * The check passes iff `|actualDebt - expectedDebt| <=
  * expectedDebt * toleranceBps / 10_000`. Default tolerance of 1 bp
  * absorbs the ~1 wei mulDiv rounding the on-chain LP pathway emits.
+ * Whenever a non-zero bps is configured the tolerance is floored at
+ * 1 wei, so small legs (`expectedDebt * bps < 10_000`) still get the
+ * documented 1-wei rounding slack instead of a zero tolerance.
+ *
+ * `swapPriceToleranceBps` MUST be a non-negative integer; the builder
+ * throws at construction time otherwise (a fractional bps would make
+ * `BigInt()` throw inside the runner on every request).
  */
 export function buildIntentSwapChecks(deps: {
   policy: IntentSwapPolicy;
 }): CheckRunner<IntentSwapBody, false> {
   const { policy } = deps;
+
+  if (!Number.isInteger(policy.swapPriceToleranceBps) || policy.swapPriceToleranceBps < 0) {
+    throw new TypeError(
+      `buildIntentSwapChecks: swapPriceToleranceBps must be a non-negative integer, ` +
+        `got ${policy.swapPriceToleranceBps}`,
+    );
+  }
 
   return async (
     ctx: SigningContext,
@@ -146,7 +160,7 @@ export function buildIntentSwapChecks(deps: {
       );
       return Result.err(
         new UpstreamUnavailableError({
-          message: `position-manager factory read failed: ${e instanceof Error ? e.message : "unknown"}`,
+          message: "position-manager factory read failed upstream",
           status: 503,
         }),
       );
@@ -213,7 +227,7 @@ export function buildIntentSwapChecks(deps: {
       );
       return Result.err(
         new UpstreamUnavailableError({
-          message: `position-manager read failed: ${e instanceof Error ? e.message : "unknown"}`,
+          message: "position-manager read failed upstream",
           status: 503,
         }),
       );
@@ -256,7 +270,12 @@ export function buildIntentSwapChecks(deps: {
         const expectedDebt = (pmShares * (totalAssets_ + VIRTUAL_ASSETS)) / denom;
         const delta =
           actualDebt > expectedDebt ? actualDebt - expectedDebt : expectedDebt - actualDebt;
-        const tolerance = (expectedDebt * BigInt(policy.swapPriceToleranceBps)) / 10_000n;
+        const toleranceBps = BigInt(policy.swapPriceToleranceBps);
+        const proportional = (expectedDebt * toleranceBps) / 10_000n;
+        // Floor at 1 wei for any non-zero bps: the bps math floors to
+        // zero whenever expectedDebt * bps < 10_000, which would deny
+        // small legs the documented ~1 wei mulDiv rounding slack.
+        const tolerance = proportional > 0n ? proportional : toleranceBps > 0n ? 1n : 0n;
         priceCheck =
           delta <= tolerance
             ? passed("swap legs match the position-manager share price within tolerance")

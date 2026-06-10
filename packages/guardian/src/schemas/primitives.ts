@@ -53,13 +53,40 @@ export const zClientName = z
   .regex(CLIENT_NAME_RE, "X-Client-Name must be 1-64 chars from [A-Za-z0-9._-]");
 
 const MAX_UINT256 = 2n ** 256n - 1n;
+// 2^256 − 1 is 78 decimal digits, so anything longer can never fit in uint256.
+const MAX_UINT256_DECIMAL_DIGITS = 78;
+
+/**
+ * Total conversion helper for the uint-string refinements. zod v4 checks are
+ * non-aborting — the `.refine()` runs even when the regex already failed — so
+ * the predicate MUST NOT assume regex-shaped input:
+ *
+ *  - the digit-count guard runs BEFORE `BigInt`, because converting a
+ *    multi-hundred-KB digit string blocks the event loop for >100ms (and
+ *    throws RangeError past ~10^6 digits);
+ *  - the try/catch turns regex-rejected non-numeric input (e.g. "1.5") into
+ *    a clean field-level issue instead of a SyntaxError thrown out of
+ *    validation.
+ */
+function uint256Of(v: string): bigint | null {
+  if (v.length > MAX_UINT256_DECIMAL_DIGITS) return null;
+  try {
+    return BigInt(v);
+  } catch {
+    return null;
+  }
+}
 
 export const zUintString = z
   .string()
   .regex(UINT_DECIMAL_RE, "Must be a decimal integer string with no leading zeros (except '0')")
-  .refine((v) => BigInt(v) <= MAX_UINT256, {
-    message: "Value exceeds uint256",
-  })
+  .refine(
+    (v) => {
+      const n = uint256Of(v);
+      return n !== null && n <= MAX_UINT256;
+    },
+    { message: "Value exceeds uint256" },
+  )
   .describe(
     "Unbounded non-negative integer encoded as decimal digits (§3.3). MUST fit in uint256.",
   );
@@ -67,9 +94,13 @@ export const zUintString = z
 export const zUintStringBelowMax = z
   .string()
   .regex(UINT_DECIMAL_RE, "Must be a decimal integer string")
-  .refine((v) => BigInt(v) < MAX_UINT256, {
-    message: "Value 2^256 - 1 is reserved as a sentinel",
-  })
+  .refine(
+    (v) => {
+      const n = uint256Of(v);
+      return n !== null && n < MAX_UINT256;
+    },
+    { message: "Value 2^256 - 1 is reserved as a sentinel" },
+  )
   .describe("Like zUintString, but rejects the sentinel 2^256 − 1.");
 
 export const zDeadlineSeconds = z

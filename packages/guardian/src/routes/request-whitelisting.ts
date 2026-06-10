@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 
 import type { GuardianAbstractions } from "../abstractions.js";
 import { runSigning } from "../lib/signing.js";
+import { zProtectedRequestHeaders } from "../schemas/headers.js";
 import { pickErrorResponses } from "../schemas/responses.js";
 import {
   zRequestWhitelistingBody,
@@ -37,9 +38,10 @@ export function requestWhitelistingRoute(abs: GuardianAbstractions) {
         // Documentation-only — see comment on intent-request-binding route.
         parse: "json",
         body: zRequestWhitelistingBody,
+        headers: zProtectedRequestHeaders,
         response: {
           200: zRequestWhitelistingResponse,
-          ...pickErrorResponses([400, 401, 403, 404, 422, 429, 500, 502, 503]),
+          ...pickErrorResponses([400, 401, 403, 404, 413, 415, 422, 429, 500, 502, 503]),
         },
         detail: {
           tags: ["whitelist-book"],

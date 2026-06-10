@@ -10,7 +10,16 @@ import {
 
 import type { AsyncCache } from "../cache/types.js";
 import { whitelistBookAbi } from "../abi/whitelist-book.js";
-import { checkDeadline, checkNonceWindow, failed, passed, rollUp, skipped } from "./helpers.js";
+import {
+  checkDeadline,
+  checkMembership,
+  checkNonceWindow,
+  failed,
+  isDeterministicContractCallFailure,
+  passed,
+  rollUp,
+  skipped,
+} from "./helpers.js";
 import {
   type A1OnChainData,
   type IntentRequestBindingPolicy,
@@ -26,10 +35,40 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
  *
  * `maxNonceAboveFloor` is a bigint to keep the on-chain nonce
  * arithmetic exact.
+ *
+ *  - `acceptedWhitelistBooks` — optional per-chain accepted set for the
+ *    client-supplied `whitelistBook`. The book address is bound
+ *    verbatim as the EIP-712 `verifyingContract`, so gating it closes
+ *    more than a status-code hole: an off-policy book fails a 422-class
+ *    check BEFORE any on-chain read (and before the per-contract §A.1
+ *    scans). Omitted = any book is read (legacy behaviour).
+ *
+ *  - `maxRequestContracts` — cap on `requestContracts.length` per
+ *    request (default {@link DEFAULT_MAX_REQUEST_CONTRACTS}). Each
+ *    whitelist-op entry costs a multicall + block-number read + up to
+ *    `ceil(eventScanMaxLookbackBlocks / eventScanBlockRange)` getLogs
+ *    calls, so an unbounded batch could stall the handler for hours.
+ *    Oversized batches fail a 422-class check before any RPC.
  */
 export type RequestWhitelistingPolicy = IntentRequestBindingPolicy & {
   readonly maxNonceAboveFloor: bigint;
+  readonly acceptedWhitelistBooks?: ReadonlyMap<number, ReadonlySet<string>>;
+  readonly maxRequestContracts?: number;
 };
+
+/** Default cap on `requestContracts.length` per §A.4 request. */
+export const DEFAULT_MAX_REQUEST_CONTRACTS = 50;
+
+/**
+ * §6.4.1 descriptions of the three nonce-window entries emitted by
+ * `checkNonceWindow`, used to emit them as `skipped` when the book
+ * itself fails a prerequisite check and its nonce state was never read.
+ */
+const NONCE_CHECK_DESCRIPTIONS = [
+  "nonce has not been consumed by the on-chain whitelist book",
+  "nonce is at or above the on-chain nonce floor",
+  "nonce does not exceed floor + MAX_NONCE_ABOVE_FLOOR",
+] as const;
 
 /**
  * Builds the §A.4 check runner.
@@ -49,6 +88,14 @@ export type RequestWhitelistingPolicy = IntentRequestBindingPolicy & {
  * Per §A.4 every rejection is 422-class. The §7.6 sentinel rejection
  * (`nonce = 2^256 − 1` ⇒ 400 bad_request) is enforced by the schema and
  * never reaches this runner.
+ *
+ * Two request-shaped guards run BEFORE any on-chain read and fail
+ * 422-class: the `requestContracts` batch cap (`maxRequestContracts`,
+ * default {@link DEFAULT_MAX_REQUEST_CONTRACTS} — the wire schema is
+ * unbounded) and, when `acceptedWhitelistBooks` is configured, the
+ * whitelist-book membership gate. A book that deterministically fails
+ * the nonce reads (EOA / non-book contract) is likewise a 422 check
+ * failure, not a 503.
  */
 export function buildRequestWhitelistingChecks(deps: {
   policy: RequestWhitelistingPolicy;
@@ -66,12 +113,62 @@ export function buildRequestWhitelistingChecks(deps: {
 }): CheckRunner<RequestWhitelistingBody, false> {
   const { policy, guardianSigner, cache, cacheTtlMs } = deps;
 
+  const maxRequestContracts = policy.maxRequestContracts ?? DEFAULT_MAX_REQUEST_CONTRACTS;
+  if (!Number.isInteger(maxRequestContracts) || maxRequestContracts < 1) {
+    throw new TypeError(
+      `buildRequestWhitelistingChecks: maxRequestContracts must be a positive integer, ` +
+        `got ${policy.maxRequestContracts}`,
+    );
+  }
+
   return async (
     ctx: SigningContext,
     body: RequestWhitelistingBody,
   ): Promise<Result<readonly CheckEntry[], CheckRunnerError<false>>> => {
     const checks: CheckEntry[] = [];
     const nowSec = Math.floor(ctx.now.getTime() / 1000);
+
+    // 0. Batch-size cap, BEFORE any on-chain read. The wire schema has
+    //    no upper bound, and each whitelist-op entry can trigger a deep
+    //    sequential log scan — an unbounded batch is a DoS vector.
+    if (body.requestContracts.length > maxRequestContracts) {
+      const r = rollUp(
+        [
+          failed(
+            "requestContracts batch size is within MAX_REQUEST_CONTRACTS",
+            `batch of ${body.requestContracts.length} contracts exceeds the maximum of ` +
+              `${maxRequestContracts}`,
+          ),
+        ],
+        "Appendix A.4 checks failed",
+      );
+      return r.ok ? Result.ok(r.checks) : Result.err(r.error);
+    }
+
+    // 0b. Whitelist-book policy gate (when configured). The book is the
+    //     EIP-712 verifyingContract, so an off-policy book is rejected
+    //     up-front — no per-contract scan, no nonce read.
+    if (policy.acceptedWhitelistBooks !== undefined) {
+      const bookCheck = checkMembership({
+        description: "whitelist book is on the accepted-books list",
+        value: body.whitelistBook,
+        accepted: policy.acceptedWhitelistBooks.get(body.chainId) ?? new Set<string>(),
+        addressLike: true,
+      });
+      checks.push(bookCheck);
+      if (!bookCheck.passed) {
+        checks.push(
+          checkDeadline({
+            nowUnixSeconds: nowSec,
+            deadline: body.deadline,
+            maxSecondsAhead: policy.maxDeadlineSecondsAhead,
+          }),
+          ...NONCE_CHECK_DESCRIPTIONS.map((d) => skipped(d)),
+        );
+        const r = rollUp(checks, "Appendix A.4 checks failed");
+        return r.ok ? Result.ok(r.checks) : Result.err(r.error);
+      }
+    }
 
     // 1. Per-contract §A.1 checks (whitelist op only). Sequential per
     //    contract: each one does its own multicall + role-events scan,
@@ -143,13 +240,34 @@ export function buildRequestWhitelistingChecks(deps: {
       floor = floorResult;
       consumed = consumedResult;
     } catch (e) {
+      // A deterministic failure (revert / empty return data) means the
+      // client-supplied book is an EOA or not a whitelist book at all —
+      // a property of the request, not of the upstream. Fail the
+      // 422-class check instead of reporting a 503. Transport-level
+      // failures keep the 503 path.
+      if (isDeterministicContractCallFailure(e, ["validatorNonceFloor", "isNonceConsumed"])) {
+        ctx.logger.warn(
+          { err: e instanceof Error ? e.message : e, whitelistBook: body.whitelistBook },
+          "A.4: whitelist-book read reverted or returned no data; treating as check failure",
+        );
+        checks.push(
+          failed(
+            "whitelist book exposes per-validator nonce state",
+            `whitelist book ${body.whitelistBook} did not answer ` +
+              "validatorNonceFloor/isNonceConsumed (EOA or non-book contract)",
+          ),
+          ...NONCE_CHECK_DESCRIPTIONS.map((d) => skipped(d)),
+        );
+        const r = rollUp(checks, "Appendix A.4 checks failed");
+        return r.ok ? Result.ok(r.checks) : Result.err(r.error);
+      }
       ctx.logger.error(
         { err: e instanceof Error ? e.message : e, whitelistBook: body.whitelistBook },
         "A.4: whitelist-book read failed",
       );
       return Result.err(
         new UpstreamUnavailableError({
-          message: `whitelist-book read failed: ${e instanceof Error ? e.message : "unknown"}`,
+          message: "whitelist-book read failed upstream",
           status: 503,
         }),
       );

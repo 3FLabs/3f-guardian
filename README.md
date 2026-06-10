@@ -35,19 +35,24 @@ plug in piece-by-piece.
 
 ```bash
 bun install
-bun run typecheck       # tsc --noEmit per package
-bun run lint            # oxlint
-bun run format          # oxfmt
-bun run test            # vitest workspace (all packages, unit only)
+bun run typecheck       # tsc --noEmit per package + scripts/
+bun run lint            # oxlint --deny-warnings over packages, vitest configs, scripts/
+bun run format          # oxfmt over packages, vitest configs, scripts/
+bun run test            # vitest per package (unit only)
 bun run test:integration # vitest, prool-anvil per worker (requires anvil on PATH)
 bun run build           # tsc emit .js + .d.ts per package
 ```
 
+The root `build` / `test` / `test:integration` / `typecheck` scripts invoke each package
+explicitly via `bun run --cwd packages/<pkg> …`, so a missing package script fails loudly.
+Bun itself is pinned through the root `packageManager` field (`bun@1.3.14`); CI reads it
+via setup-bun's `bun-version-file`, so bumping Bun is a single-line change.
+
 Per-package work:
 
 ```bash
-bun run --filter '@3flabs/guardian' test
-bun run --filter '@3flabs/guardian-defaults' build
+bun run --cwd packages/guardian test
+bun run --cwd packages/guardian-defaults build
 ```
 
 ## Running integration tests
@@ -73,19 +78,30 @@ bun run test:integration
 
 The shared fixtures package — `@3flabs/guardian-test-fixtures` — is private (`"private": true`)
 and never published. It bundles foundry artifacts (bytecode + ABI) under `artifacts/` stamped
-with their source commit hash. Regenerate them when the sibling repos (`grunt`,
-`3f-request-whitelist`) advance:
+with their source commit hash (suffixed `-dirty` when extracted from a tree with uncommitted
+changes). Regenerate them when the sibling repos (`grunt`, `3f-request-whitelist`) advance:
 
 ```bash
 bun run fixtures:extract     # rewrite artifacts/*.json from sibling out/ trees
-bun run fixtures:check       # CI-style fail-fast on drift
+bun run fixtures:check       # validate bundled artifacts + fail-fast on sibling drift
 ```
+
+`fixtures:check` runs in CI on every PR. It always validates the bundled artifacts'
+integrity and only performs the sibling-drift comparison for repos whose forge output is
+actually present (printing a `[fixtures] NOTICE` for each absent repo), so it passes on a
+fresh clone without sibling checkouts.
 
 ## Releasing
 
 1. After a code change, run `bun run changeset` and pick the affected package(s) and bump kind. Commit the resulting `.changeset/*.md`.
 2. Push to `main`. The `release` workflow opens (or updates) a "Version Packages" PR.
 3. Merge that PR. The workflow re-runs and publishes to npm with provenance via GitHub OIDC.
+
+Before `changeset publish` runs, `scripts/rewrite-workspace-deps.ts` rewrites the workspace
+manifests: `workspace:*` ranges become real versions, private workspace devDependencies
+(e.g. `@3flabs/guardian-test-fixtures`) are dropped from the published manifests, and the
+script errors if a private workspace package appears in `dependencies`, `peerDependencies`,
+or `optionalDependencies`.
 
 **One-time setup on npmjs.com**: add each package as an *OIDC trusted publisher* pointing at
 `3FLabs/3f-guardian` repo / `release.yml` workflow. Without this, the publish step will
@@ -104,8 +120,9 @@ packages/
 │   │   ├─ schemas/                 zod primitives, headers, per-endpoint bodies
 │   │   ├─ plugins/                 raw-body, request-id, version-header, content-type, logger, auth, error-handler
 │   │   ├─ routes/                  one file per endpoint
+│   │   ├─ typed-data/              EIP-712 build*TypedData builders + makeSign* orchestrators
 │   │   ├─ signers/                 dev private-key envelope (host substitutes KMS/HSM in prod)
-│   │   └─ lib/                     hmac, time, request-id, checks, result, signing, logger
+│   │   └─ lib/                     hmac, time, request-id, checks, result, signing, logger, eip712-domain
 │   └─ tests/
 ├─ guardian-defaults/
 │   ├─ src/
@@ -113,7 +130,7 @@ packages/
 │   │   ├─ rate-limit/in-memory.ts  inMemoryRateLimiter() with pluggable Store
 │   │   ├─ cache/                   AsyncCache<V> + inMemoryCache (used by §A.1 / §A.4)
 │   │   ├─ abi/                     bundled on-chain ABIs and role/state constants
-│   │   └─ checks/                  buildIntent{Request,Fund,Swap,Whitelisting}Checks
+│   │   └─ checks/                  buildIntentRequestBindingChecks / buildIntentFundBindingChecks / buildIntentSwapChecks / buildRequestWhitelistingChecks
 │   └─ tests/
 └─ guardian-test-fixtures/          private, never published
     ├─ src/

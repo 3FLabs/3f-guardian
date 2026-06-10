@@ -1,12 +1,46 @@
 import { z } from "zod";
-import { zAddress, zHash32, zRfc3339Utc, zSignature, zUuid } from "./primitives.js";
+import type { Address, Hex } from "viem";
+import { zRfc3339Utc, zUuid } from "./primitives.js";
 import { zChecks } from "./checks.js";
+
+/**
+ * Response-side hex primitives. Unlike the request-side primitives in
+ * `primitives.ts` — which accept any case on the wire and lower-case via
+ * `.transform()`, so their documented (input-side) pattern is mixed-case
+ * — these lower-case via `.toLowerCase()` BEFORE the pattern check. The
+ * OpenAPI document is generated from the input side of every schema
+ * (`io: "input"` in server.ts), so this renders the lower-case format
+ * responses actually carry while still tolerating a mixed-case value
+ * from a host abstraction at runtime.
+ */
+export const zAddressResponse = z
+  .string()
+  .toLowerCase()
+  .regex(/^0x[0-9a-f]{40}$/, "Address must be 0x-prefixed 20 bytes of hex")
+  .transform((v): Address => v as Address)
+  .describe("EVM address, lower-case hex (§3.2).");
+
+export const zHash32Response = z
+  .string()
+  .toLowerCase()
+  .regex(/^0x[0-9a-f]{64}$/, "Must be 0x-prefixed 32 bytes of hex")
+  .transform((v): Hex => v as Hex)
+  .describe("32-byte hash, lower-case hex (§3.4).");
+
+export const zSignatureResponse = z
+  .string()
+  .toLowerCase()
+  .regex(/^0x[0-9a-f]{130}$/, "Must be 0x-prefixed 65 bytes of hex (r ‖ s ‖ v)")
+  .transform((v): Hex => v as Hex)
+  .describe("ECDSA signature, lower-case hex (§3.5).");
 
 export const zSigningSuccess = z
   .object({
-    guardian: zAddress.describe("Guardian signer address. Equal to GET /version's guardianSigner."),
-    signature: zSignature.describe("EIP-712 signature."),
-    payloadHash: zHash32.describe(
+    guardian: zAddressResponse.describe(
+      "Guardian signer address. Equal to GET /version's guardianSigner.",
+    ),
+    signature: zSignatureResponse.describe("EIP-712 signature."),
+    payloadHash: zHash32Response.describe(
       "EIP-712 digest. Provided so callers MAY cross-check the binding.",
     ),
     signedAt: zRfc3339Utc.describe("Informational. MUST NOT be relied upon for replay protection."),
@@ -83,6 +117,12 @@ export const errorResponses = {
   409: zErrorEnvelope.describe(
     "`state_conflict` — On-chain state incompatible with the request (transient). Per §6.6.1 returned only when the §A.2 fund-state check fails alone.",
   ),
+  413: zErrorEnvelope.describe(
+    "`bad_request` — Request body exceeds the Guardian's size cap. §6.5 defines no dedicated 413 code; the envelope reuses `bad_request`.",
+  ),
+  415: zErrorEnvelope.describe(
+    "`bad_request` — Content-Type other than application/json on a body-bearing request (§6.1). §6.5 defines no dedicated 415 code; the envelope reuses `bad_request`.",
+  ),
   422: zErrorEnvelope.describe(
     "`validation_failed` — One or more policy checks failed. The `checks` array enumerates each check's outcome.",
   ),
@@ -96,7 +136,7 @@ export const errorResponses = {
     "`upstream_unavailable` — Upstream RPC or dependency returned an error.",
   ),
   503: zErrorEnvelope.describe(
-    "`upstream_unavailable` — Guardian or its upstream is unavailable; honour the `Retry-After` response header.",
+    "`upstream_unavailable` — Guardian or its upstream is unavailable; honour the `Retry-After` response header when present.",
   ),
 } as const;
 

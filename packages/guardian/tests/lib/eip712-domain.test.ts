@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { Address, PublicClient } from "viem";
+import {
+  BaseError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+  HttpRequestError,
+  type Address,
+  type PublicClient,
+} from "viem";
 
 import {
   eip712DomainCacheKey,
@@ -69,8 +76,72 @@ describe("fetchEip712DomainNameVersion", () => {
     expect(r.isErr()).toBe(true);
     if (r.isErr()) {
       expect(r.error._tag).toBe("UpstreamUnavailable");
-      expect(r.error.status).toBe(503);
+      if (r.error._tag === "UpstreamUnavailable") expect(r.error.status).toBe(503);
     }
+  });
+
+  it("returns UpstreamUnavailableError on transport failure wrapped in a viem cause chain", async () => {
+    const client = makeClient({
+      read: () => {
+        throw new BaseError("call failed", {
+          cause: new HttpRequestError({ url: "http://rpc.internal:8545", details: "ECONNREFUSED" }),
+        });
+      },
+    });
+    const r = await fetchEip712DomainNameVersion({
+      client,
+      chainId: 1,
+      verifyingContract: CONTRACT,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error._tag).toBe("UpstreamUnavailable");
+      // The client-facing message must not leak the raw viem error text
+      // (it can embed RPC URLs).
+      expect(r.error.message).not.toContain("rpc.internal");
+      expect(r.error.message).not.toContain("ECONNREFUSED");
+    }
+  });
+
+  it("returns NotFoundError (404) when the contract returns zero data (no code / no ERC-5267)", async () => {
+    const client = makeClient({
+      read: () => {
+        throw new BaseError("call failed", {
+          cause: new ContractFunctionZeroDataError({ functionName: "eip712Domain" }),
+        });
+      },
+    });
+    const r = await fetchEip712DomainNameVersion({
+      client,
+      chainId: 1,
+      verifyingContract: CONTRACT,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error._tag).toBe("NotFound");
+      expect(r.error.message).toContain(CONTRACT);
+      expect(r.error.message).toContain("ERC-5267");
+    }
+  });
+
+  it("returns NotFoundError (404) when eip712Domain() reverts", async () => {
+    const client = makeClient({
+      read: () => {
+        throw new BaseError("call failed", {
+          cause: new ContractFunctionRevertedError({
+            abi: [],
+            functionName: "eip712Domain",
+          }),
+        });
+      },
+    });
+    const r = await fetchEip712DomainNameVersion({
+      client,
+      chainId: 1,
+      verifyingContract: CONTRACT,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error._tag).toBe("NotFound");
   });
 
   it("populates the cache on miss and short-circuits on hit", async () => {

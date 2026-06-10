@@ -7,17 +7,30 @@ on:
   # main-push pipeline and would otherwise duplicate the run.
   workflow_call:
 
+# Verification only ever reads the repo. When called from release.yml this can
+# only narrow (never expand) whatever the caller granted.
+permissions:
+  contents: read
+
 jobs:
   verify:
     name: build + lint + typecheck + test + integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      # No later step needs git credentials (we never push from CI), so
+      # don't leave the GITHUB_TOKEN sitting in .git/config for the rest
+      # of the job — release.yml calls this workflow and its token may
+      # carry write scopes.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          bun-version: latest
+          persist-credentials: false
+
+      # Bun version is pinned via the root package.json `packageManager`
+      # field — one source of truth shared by local dev and release.yml.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
 
       # vitest 4 spawns Node child workers (its `forks` pool, used by
       # the integration config) and prool 0.2.4 calls
@@ -25,7 +38,7 @@ jobs:
       # anvil instance. The runner's default Node is older, so install
       # an explicit modern version. Aligned with `release.yml`.
       - name: Setup Node.js (for vitest workers)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
 
@@ -34,14 +47,22 @@ jobs:
       # `@3flabs/guardian-test-fixtures`). The toolchain action puts
       # `anvil` / `forge` / `cast` on `PATH`; we don't run `forge build`
       # here because all foundry artifacts are bundled in
-      # `packages/guardian-test-fixtures/artifacts/`.
+      # `packages/guardian-test-fixtures/artifacts/`. Pinned to a
+      # concrete foundry release (not `stable`) so runs are reproducible.
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
         with:
-          version: stable
+          version: v1.7.1
 
       - name: Install
         run: bun install --frozen-lockfile
+
+      # Validates the bundled contract fixtures (artifact integrity +
+      # INDEX consistency). Sibling-repo drift detection is skipped with
+      # a notice when the sibling checkouts aren't present — which is
+      # always the case on a plain runner.
+      - name: Fixtures check
+        run: bun run fixtures:check
 
       # Build first so downstream packages resolve the workspace
       # dependency's `dist/index.d.ts` (per the `exports` map). Without
