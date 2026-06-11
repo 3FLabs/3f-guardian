@@ -44,12 +44,20 @@ export type RateLimitStore = {
    * transaction on Redis, single-threaded execution in a Durable
    * Object). Optional for backwards compatibility — when absent the
    * limiter serialises `read` / `write` per key within the process.
+   *
+   * `signal` is the caller's per-request `AbortSignal`, forwarded from
+   * `accountRateLimit(tokenInfo, { signal })`. Transport-backed stores
+   * SHOULD observe it and abandon in-flight work once the shell has
+   * timed the request out (the synchronous in-memory store has nothing
+   * to abandon and ignores it). Implementations declaring only the
+   * first four parameters remain valid.
    */
   consume?: (
     key: string,
     limit: number,
     windowSeconds: number,
     nowSec: number,
+    signal?: AbortSignal,
   ) => Promise<RateLimitDecision>;
 };
 

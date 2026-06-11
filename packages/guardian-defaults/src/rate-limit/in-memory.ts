@@ -66,7 +66,9 @@ export type RateLimiterOptions = {
  * the read/write fallback path — a task whose caller was already
  * answered 503 by the shell's `rateLimitMs` deadline is dropped at the
  * head of the per-key queue instead of executed late, so no budget is
- * burned for rejected requests.
+ * burned for rejected requests. On the `consume` path the signal is
+ * forwarded to the store so transactional implementations can abandon
+ * in-flight work too (the bundled synchronous store ignores it).
  */
 export function inMemoryRateLimiter(options: RateLimiterOptions) {
   const { limit, windowSeconds, now = Date.now, keyOf = (t: TokenInfo) => t.tokenId } = options;
@@ -165,7 +167,13 @@ export function inMemoryRateLimiter(options: RateLimiterOptions) {
     const key = keyOf(token);
 
     const decision = store.consume
-      ? await store.consume(key, limit, windowSeconds, Math.floor(now() / 1000))
+      ? await store.consume(
+          key,
+          limit,
+          windowSeconds,
+          Math.floor(now() / 1000),
+          callOptions?.signal,
+        )
       : await readModifyWrite(key, callOptions?.signal);
 
     if (!decision.allowed) {

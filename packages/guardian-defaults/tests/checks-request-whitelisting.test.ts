@@ -81,14 +81,20 @@ function makeClient(args: {
       });
       const r = responses[i++];
       if (r === undefined) throw new Error(`unexpected multicall #${i}`);
-      if (r instanceof Error) throw r;
-      // Mirror viem: under allowFailure (the §A.1 stage-1 read) each
-      // slot is wrapped; an Error element is a per-slot failure.
+      // Mirror viem: under allowFailure (the §A.1 stage-1 read) a
+      // chunk-level failure is never thrown — every slot in the chunk
+      // reports the same error — and an Error element is a per-slot
+      // failure. Only without allowFailure (the whitelist-book read)
+      // does viem throw.
       if (params.allowFailure === true) {
+        if (r instanceof Error) {
+          return params.contracts.map(() => ({ status: "failure", error: r }));
+        }
         return r.map((v) =>
           v instanceof Error ? { status: "failure", error: v } : { status: "success", result: v },
         );
       }
+      if (r instanceof Error) throw r;
       // Without allowFailure, viem throws the first slot's error.
       const slotError = r.find((v) => v instanceof Error);
       if (slotError !== undefined) throw slotError;

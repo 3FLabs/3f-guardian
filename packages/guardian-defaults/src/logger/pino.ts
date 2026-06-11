@@ -34,7 +34,11 @@ export type PinoLoggerOptions = {
   readonly redact?: readonly string[];
 };
 
-export const DEFAULT_REDACT_PATHS: readonly string[] = [
+// Frozen at runtime, not just `readonly` at the type level: this array
+// is reused as the default for every `pinoLogger()` call, so an in-place
+// mutation (possible from plain JS) would silently weaken redaction for
+// all later logger instances.
+export const DEFAULT_REDACT_PATHS: readonly string[] = Object.freeze([
   "headers.authorization",
   "headers['x-guardian-signature']",
   "headers['x-guardian-timestamp']",
@@ -49,7 +53,7 @@ export const DEFAULT_REDACT_PATHS: readonly string[] = [
   "*.*.hmacSecret",
   "*.*.secret",
   "*.*.privateKey",
-];
+]);
 
 const VALID_LEVELS = new Set(["trace", "debug", "info", "warn", "error", "fatal", "silent"]);
 

@@ -36,13 +36,17 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      # NOTE: keep the default `persist-credentials: true` here —
-      # changesets/action pushes the version branch with the git
-      # credentials this checkout leaves behind.
+      # Don't persist the checkout token: this job's GITHUB_TOKEN is
+      # write-scoped, and `bun install` / `bun run build` below execute
+      # third-party lifecycle and build scripts that must not find a
+      # push-capable credential sitting in .git/config. Authenticated
+      # git access is re-added in a dedicated step immediately before
+      # changesets/action (the only step that needs to push).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           # Required by changesets to read the full git history.
           fetch-depth: 0
+          persist-credentials: false
 
       # Bun version is pinned via the root package.json `packageManager`
       # field — one source of truth shared by local dev and ci.yml.
@@ -70,6 +74,15 @@ jobs:
 
       - name: Build packages
         run: bun run build
+
+      # Re-add authenticated git access only now, after install/build ran
+      # without credentials: changesets/action creates/updates the Version
+      # PR through the API (GITHUB_TOKEN env) but pushes the version branch
+      # with plain `git push`, which needs a token on the remote URL.
+      - name: Authenticate git for the changesets push
+        run: git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # SHA-pinned: this action runs with the write-scoped GITHUB_TOKEN and
       # drives `npm publish`, so a mutable tag here is the most sensitive

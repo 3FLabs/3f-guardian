@@ -281,12 +281,39 @@ async function runCheck(): Promise<void> {
       failures++;
       continue;
     }
-    const missing = (["abi", "bytecode", "deployedBytecode", "sourceCommitHash"] as const).filter(
+    const missing = (
+      [
+        "name",
+        "sourceRepo",
+        "sourcePath",
+        "abi",
+        "bytecode",
+        "deployedBytecode",
+        "sourceCommitHash",
+      ] as const
+    ).filter(
       (field) =>
         artifact[field] === undefined || artifact[field] === null || artifact[field] === "",
     );
     if (missing.length > 0) {
       console.error(`[fixtures] INVALID: ${src.name} is missing field(s): ${missing.join(", ")}`);
+      failures++;
+      continue;
+    }
+    // The stamped provenance must match SOURCES, not merely be present —
+    // otherwise a tampered artifact plus a regenerated INDEX.json would
+    // pass on runners without sibling checkouts (the index expectation
+    // below is built from these same artifact fields).
+    if (
+      artifact.name !== src.name ||
+      artifact.sourceRepo !== src.repo ||
+      artifact.sourcePath !== src.sourcePath
+    ) {
+      console.error(
+        `[fixtures] INVALID: ${src.name} has mismatched provenance metadata ` +
+          `(got ${artifact.name} / ${artifact.sourceRepo} / ${artifact.sourcePath}, ` +
+          `expected ${src.name} / ${src.repo} / ${src.sourcePath})`,
+      );
       failures++;
       continue;
     }

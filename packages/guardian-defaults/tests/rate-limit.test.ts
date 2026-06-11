@@ -145,6 +145,29 @@ describe("inMemoryRateLimiter", () => {
     expect(results.filter((r) => r.isErr())).toHaveLength(8);
   });
 
+  it("forwards the caller AbortSignal to a custom store's consume", async () => {
+    const seenSignals: Array<AbortSignal | undefined> = [];
+    const store: RateLimitStore = {
+      async read() {
+        return undefined;
+      },
+      async write() {},
+      async consume(_key, _limit, windowSeconds, nowSec, signal) {
+        seenSignals.push(signal);
+        return { allowed: true, count: 1, resetUnixSeconds: nowSec + windowSeconds };
+      },
+    };
+    const now = 1_700_000_000_000;
+    const limiter = inMemoryRateLimiter({ limit: 5, windowSeconds: 60, now: () => now, store });
+    const tk = token();
+
+    const controller = new AbortController();
+    expect((await limiter(tk, { signal: controller.signal })).isOk()).toBe(true);
+    expect((await limiter(tk)).isOk()).toBe(true);
+
+    expect(seenSignals).toEqual([controller.signal, undefined]);
+  });
+
   it("a rejected store call does not poison the per-key serialisation chain", async () => {
     const map = new Map<string, RateLimitState>();
     let failNext = true;
