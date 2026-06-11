@@ -1,5 +1,67 @@
 # @3flabs/guardian
 
+## 0.4.0
+
+### Minor Changes
+
+- 43e918b: Second review-response hardening pass.
+
+  `@3flabs/guardian`:
+
+  - **HMAC verification now runs BEFORE the §5.2 scope check.** For HMAC-flagged tokens the body signature completes authentication, so a stolen bearer token without the secret sees a uniform 401 instead of reading scope membership from the 401-vs-403 split.
+  - 401 responses carry `WWW-Authenticate: Bearer realm="guardian"` (RFC 9110 §11.6.1).
+  - Content-type gates compare the exact media type instead of a prefix: `application/jsonx` is now 415, `application/json; charset=utf-8` still accepted.
+  - `GuardianTimeouts` overrides above `2^31 − 1` ms are rejected at construction — `setTimeout` would wrap them to ~1 ms and turn every request into an instant 503.
+  - `runSigning` accepts an optional `requestSignal` (joined into `SigningContext.signal` via `AbortSignal.any`) and the built-in routes pass the HTTP request's own signal, so a disconnected client's on-chain/KMS work stops at the next cancellation point.
+  - The deadline timer aborts/rejects before logging, so a throwing host logger can neither skip the timeout nor crash the process from a timer callback.
+  - `privateKeyToSignTypedData` no longer surfaces viem error text in the 500 envelope; the original error is preserved as `cause`.
+
+  `@3flabs/guardian-defaults`:
+
+  - **§A.2 now enforces `positionManager`:** the field was previously required, documented as a check input, and read by nothing. The runner now checks it against the intent's `isPositionManager`-flagged deposit/target asset (no extra RPC — the data was already in the `getIntent` read).
+  - **§A.1 scans every factory that claims the contract:** with multiple accepted factories answering `isRequest=true` (factory migration, registry proxies), the role-events scan now accepts the `RequestCreated` deployment marker from any of them instead of silently degrading to `tooOld` against `factoryHits[0]`; multi-hits are logged at error level and the cache entry is attributed to the factory that actually emitted the event.
+  - `AsyncCache.get` purges (best-effort `delete`) an entry that fails schema validation and notifies a new overridable `onValidationFailure` hook; `inMemoryCache` exposes it as an option — cache poisoning and version skew are no longer silent.
+  - `checkSwapPriceTolerance` now applies the same 1-wei tolerance floor as the §A.3 runner via the shared (and newly exported) `bpsToleranceWithWeiFloor`, so hosts composing custom checks don't get spurious 422s on small legs.
+  - §A.4 emits exactly one request-wide deadline entry on the failure path too (previously the per-contract §A.1 deadline entry was duplicated there); `DEADLINE_CHECK_DESCRIPTION` is exported for hosts that post-process check arrays.
+
+  Tooling: `fixtures:check` hard-fails any provenance stamp that is not a full 40-hex commit hash (previously only `-dirty`; `no-git` passed forever), CI builds the locally-vendored fixture contracts so the byte-comparison path does real work on runners, and workflows carry `timeout-minutes`.
+
+- 43e918b: Repo-wide hardening pass: resilience, correctness, and spec-conformance fixes across the HTTP shell and the default check runners.
+
+  **@3flabs/guardian**
+
+  - Unknown routes / method mismatches now return `404 not_found` (was `500 internal_error`); malformed JSON bodies return `400 bad_request` (was 500); unexpected errors return a fixed `"Unexpected Guardian-side failure"` message instead of leaking the thrown error text.
+  - **Breaking for clients:** the §6.2 `X-Client-Name` / `X-Client-Version` headers are now required on every protected `/v1/*` route (400 when missing/malformed) and rendered in the OpenAPI document.
+  - New optional `GuardianAbstractions.timeouts` (defaults exported as `DEFAULT_GUARDIAN_TIMEOUTS`) bounds every host abstraction call; `authenticate` / `accountRateLimit` / `liveness` / `SigningContext` now receive an `AbortSignal`.
+  - New optional `GuardianAbstractions.maxBodyBytes` (default 1 MiB, `DEFAULT_MAX_BODY_BYTES`) caps request bodies with a 413 before authentication.
+  - `probeUpstream`, when supplied, is now actually consulted before signing work.
+  - JSON content types match case-insensitively; non-JSON bodies on host-composed routes are no longer hijacked by the guardian parser.
+  - A `verifyingContract` with no code / no ERC-5267 support now yields `404 not_found` instead of `503`; `UpstreamUnavailableError` gained `retryAfterSeconds` → `Retry-After`.
+  - Decimal uint256 string fields reject >78-digit and non-numeric input as field-level 400s instead of risking event-loop stalls (`zUintString` hardening).
+  - `buildIntentSwapTypedData` / whitelisting builders now enforce `verifyingContract === body.facility|whitelistBook`.
+
+  **@3flabs/guardian-defaults**
+
+  - **Fail-closed fixes:** role-holder checks no longer pass when the event scan ends `tooOld` after observing a rogue grant; new `onLookbackExhausted: "skip" | "fail"` policy knob.
+  - Deterministic client-input failures (EOA / wrong contract supplied) across A.1/A.2/A.4 now fail checks with 422 instead of returning `503 upstream_unavailable`; upstream error text is no longer embedded in client-facing 503 messages.
+  - Rate limiter is burst-safe: new atomic `RateLimitStore.consume` (`RateLimitDecision`); whole-second `Retry-After` values.
+  - `inMemoryCache` is bounded by default (`DEFAULT_MAX_ENTRIES` = 4096) and rejects invalid `ttlMs`; `pinoLogger` validates `LOG_LEVEL` (invalid values fall back to `info`), and the default redact list (`DEFAULT_REDACT_PATHS`) covers `privateKey` and nested secrets.
+  - New `RequestWhitelistingPolicy.maxRequestContracts` (default 50) and `acceptedWhitelistBooks`; `eventScanDeadlineMs` budget for role-event scans; `getLogs` chunking respects the configured range cap on the final chunk; swap tolerance floors at 1 wei when `swapPriceToleranceBps > 0` and rejects non-integer bps at construction.
+
+### Patch Changes
+
+- 43e918b: **Breaking (`@3flabs/guardian-defaults`):** `AsyncCache<V>` is now an abstract class with schema-validated reads instead of a 3-method interface.
+
+  - The constructor takes a schema — any [Standard Schema](https://standardschema.dev) (zod ≥ 3.24 / v4, valibot ≥ 1.0, arktype ≥ 2.0, …) — and the value type `V` is inferred from the schema's output.
+  - `get` is implemented by the base class: it performs a raw lookup via the new protected abstract `rawGet(key): Promise<unknown>` and runs every hit through the schema (`safeParse`-style, non-throwing). A stored value that fails to parse is reported as a **miss**, so a poisoned, truncated, or old-package-version entry can never reach a consumer as a typed hit. `set` / `delete` remain abstract.
+  - `inMemoryCache(options?)` is now `inMemoryCache(schema, options?)`.
+  - New export `zA1OnChainData` (from `./checks` and the root) — the zod schema for `A1OnChainData`, ready to pass to a cache constructor: `inMemoryCache(zA1OnChainData, { … })`.
+  - New type export `StandardSchemaV1` (from `./cache` and the root) for implementers typing their own adapters.
+
+  Migration: replace `inMemoryCache<T>(options)` with `inMemoryCache(schema, options)`, and convert hand-rolled `AsyncCache` object literals into subclasses providing `rawGet`/`set`/`delete`.
+
+  `@3flabs/guardian`: documentation-only sync (the `Eip712DomainCache` structural interface is unchanged and remains satisfied by `AsyncCache` instances).
+
 ## 0.3.1
 
 ### Patch Changes

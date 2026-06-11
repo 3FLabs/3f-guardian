@@ -1,6 +1,6 @@
 {
   "name": "@3flabs/guardian-test-fixtures",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
   "description": "Internal test fixtures: prool anvil pool + on-chain Solidity deployments shared by @3flabs/guardian and @3flabs/guardian-defaults integration tests. Never published.",
   "type": "module",
