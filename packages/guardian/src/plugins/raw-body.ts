@@ -72,41 +72,52 @@ async function readBodyCapped(request: Request, maxBodyBytes: number): Promise<U
  * reach Elysia's own parser chain on an unconsumed stream.
  */
 export function rawBodyPlugin(maxBodyBytes: number = DEFAULT_MAX_BODY_BYTES) {
-  return (
-    new Elysia({ name: "guardian:raw-body" })
-      // Fast-path rejection before any buffering when the client declares
-      // an oversized body up-front. Chunked bodies (no Content-Length) are
-      // counted as they stream in `readBodyCapped`.
-      .onRequest(({ request }) => {
-        const declared = Number(request.headers.get("content-length") ?? "");
-        if (Number.isFinite(declared) && declared > maxBodyBytes) {
-          throw payloadTooLarge(maxBodyBytes);
-        }
-      })
-      .onParse({ as: "global" }, async ({ request }, contentType) => {
-        if (request.method === "GET" || request.method === "HEAD") {
-          rawBodyByRequest.set(request, EMPTY_BODY);
-          return;
-        }
-        // Media types are case-insensitive (RFC 7231 §3.1.1.1); lowercase
-        // before matching, mirroring contentTypePlugin so the two gates
-        // can never disagree.
-        const ct = contentType.toLowerCase();
-        const isJson = ct.startsWith("application/json");
-        if (!isJson && !ct.startsWith("text/")) return;
+  // NaN (e.g. `Number()` of an unset env var) would silently disable the
+  // cap — every `received > maxBodyBytes` comparison is false — while
+  // 0 / negative would 413 every non-empty body. Reject loudly at
+  // construction, matching the `inMemoryRateLimiter` / `inMemoryCache`
+  // validation in guardian-defaults.
+  if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes <= 0) {
+    throw new TypeError(`guardian: maxBodyBytes must be a positive integer, got ${maxBodyBytes}`);
+  }
+  return new Elysia({ name: "guardian:raw-body" })
+    .onParse({ as: "global" }, async ({ request }, contentType) => {
+      if (request.method === "GET" || request.method === "HEAD") {
+        rawBodyByRequest.set(request, EMPTY_BODY);
+        return;
+      }
+      // Media types are case-insensitive (RFC 7231 §3.1.1.1); lowercase
+      // before matching, mirroring contentTypePlugin so the two gates
+      // can never disagree.
+      const ct = contentType.toLowerCase();
+      const isJson = ct.startsWith("application/json");
+      if (!isJson && !ct.startsWith("text/")) return;
 
-        const bytes = await readBodyCapped(request, maxBodyBytes);
-        rawBodyByRequest.set(request, bytes);
+      // Fast-path rejection before any buffering when the client
+      // declares an oversized body up-front. It lives here — after the
+      // content-type narrowing — rather than in an app-wide `onRequest`
+      // gate: Elysia `request` events are not re-scoped by
+      // `as("scoped")` and propagate unfiltered through `.use()`, so an
+      // onRequest check would 413 e.g. multipart uploads on every route
+      // of a composed host app even though guardian never buffers those
+      // bodies. Chunked bodies (no Content-Length) are counted as they
+      // stream in `readBodyCapped`.
+      const declared = Number(request.headers.get("content-length") ?? "");
+      if (Number.isFinite(declared) && declared > maxBodyBytes) {
+        throw payloadTooLarge(maxBodyBytes);
+      }
 
-        if (isJson) {
-          if (bytes.byteLength === 0) return {};
-          return JSON.parse(TEXT_DECODER.decode(bytes));
-        }
-        return TEXT_DECODER.decode(bytes);
-      })
-      .derive({ as: "global" }, ({ request }) => ({
-        rawBody: rawBodyByRequest.get(request) ?? EMPTY_BODY,
-      }))
-      .as("scoped")
-  );
+      const bytes = await readBodyCapped(request, maxBodyBytes);
+      rawBodyByRequest.set(request, bytes);
+
+      if (isJson) {
+        if (bytes.byteLength === 0) return {};
+        return JSON.parse(TEXT_DECODER.decode(bytes));
+      }
+      return TEXT_DECODER.decode(bytes);
+    })
+    .derive({ as: "global" }, ({ request }) => ({
+      rawBody: rawBodyByRequest.get(request) ?? EMPTY_BODY,
+    }))
+    .as("scoped");
 }

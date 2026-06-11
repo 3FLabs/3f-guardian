@@ -71,6 +71,13 @@ type ChunkLog = {
  * to `UpstreamUnavailableError` (503). It bounds how long a single deep
  * scan can occupy a request handler. `now` is clock injection for
  * tests; defaults to `Date.now`.
+ *
+ * `signal` (optional) aborts the scan at the next chunk boundary —
+ * callers wire the request's `SigningContext.signal` here so a request
+ * whose `signMs` deadline already expired (the shell answered 503)
+ * stops issuing `getLogs` instead of walking the chain in the
+ * background. Like `deadlineMs`, abort surfaces as a thrown error the
+ * runner maps to `UpstreamUnavailableError`.
  */
 export async function scanRoleHolders(args: {
   readonly client: PublicClient;
@@ -80,6 +87,7 @@ export async function scanRoleHolders(args: {
   readonly blockRange: bigint;
   readonly maxLookbackBlocks: bigint;
   readonly deadlineMs?: number;
+  readonly signal?: AbortSignal;
   readonly now?: () => number;
 }): Promise<RoleScanOutcome> {
   const { client, factory, requestContract, latestBlock, blockRange, maxLookbackBlocks } = args;
@@ -107,6 +115,12 @@ export async function scanRoleHolders(args: {
   // one, so providers with a hard getLogs range cap equal to the
   // configured range never see an over-sized request.
   while (toBlock >= earliestAllowed && foundDeploymentBlock === undefined) {
+    if (args.signal?.aborted) {
+      throw new Error(
+        `role-events scan aborted by the request signal before reaching ` +
+          `block ${earliestAllowed} (stopped above ${toBlock})`,
+      );
+    }
     if (!firstChunk && args.deadlineMs !== undefined && now() - startedAt > args.deadlineMs) {
       throw new Error(
         `role-events scan exceeded its ${args.deadlineMs}ms budget before reaching ` +

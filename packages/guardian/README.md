@@ -202,15 +202,18 @@ buildGuardianServer(abs).listen(3000);
 
 `buildGuardianServer` returns a vanilla [Elysia](https://elysiajs.com/) instance, so callers
 retain full access to `.listen()`, `.handle()` (for tests), and `.use()` for further
-composition. Guardian's request pipeline is global, so routes a host adds to the returned
-instance inherit:
+composition. Composition caveats — parts of guardian's request pipeline reach beyond the
+routes it defines:
 
-- the §6.1 JSON-only content-type guard on POST / PUT (415 otherwise);
-- guardian's body parser for `application/json` and `text/*` bodies (other content types —
-  multipart, urlencoded, … — are left untouched for Elysia's own parser chain) and its
-  `maxBodyBytes` cap (413 past the cap);
-- the `requestId` / `logger` / `rawBody` context keys, which shadow any same-named keys the
-  host derives.
+- the §6.1 JSON-only content-type guard on POST / PUT (415 otherwise), guardian's body
+  parser for `application/json` and `text/*` bodies, and its `maxBodyBytes` cap (413 past
+  the cap) apply to **every route of the entire composed application** — any app, at any
+  depth, that `.use()`s the guardian instance — not just routes added to the returned
+  instance. Other content types (multipart, urlencoded, …) are left untouched for Elysia's
+  own parser chain everywhere, and the cap is enforced only on the content types guardian
+  buffers;
+- the `requestId` / `logger` / `rawBody` context keys shadow any same-named keys the host
+  derives.
 
 For the per-subsystem deep dive (logger options, rate-limiter store interface, cache TTL
 semantics, full policy type tables), see the
@@ -253,14 +256,20 @@ overrides the defaults (exported as `DEFAULT_GUARDIAN_TIMEOUTS`):
 
 | Field | Bounds | Default |
 |---|---|---|
-| `authenticateMs` | `authenticate(token)` | 5 000 ms |
-| `rateLimitMs` | `accountRateLimit(tokenInfo)` | 5 000 ms |
+| `authenticateMs` | `authenticate(token)` | 2 000 ms |
+| `rateLimitMs` | `accountRateLimit(tokenInfo)` | 1 000 ms |
 | `livenessMs` | `liveness()` (GET `/health`) | 5 000 ms |
-| `signMs` | a whole `sign*` validate-and-sign call | 8 000 ms |
+| `signMs` | a whole `sign*` validate-and-sign call | 6 000 ms |
 
 On expiry the shell responds `503 upstream_unavailable` and logs the abstraction name at
-error level. Keep every deadline below the HTTP server's idle timeout (`Bun.serve` defaults
-to 10 s), otherwise the socket is reset before the 503 envelope can be written.
+error level. The deadlines apply sequentially on one signing request
+(`authenticate` → `accountRateLimit` → `sign*`), so the worst-case sum
+`authenticateMs + rateLimitMs + signMs` (9 s with the defaults) must stay below the HTTP
+server's idle timeout (`Bun.serve` defaults to 10 s), otherwise the socket is reset before
+the 503 envelope can be written. Hosts raising any deadline past that budget must also pass
+a larger `idleTimeout` to `.listen()` (`Bun.serve` accepts up to 255 s). Overrides are
+validated at construction: any non-finite or ≤ 0 value throws a `TypeError`, so
+misconfiguration fails loudly at startup instead of turning every call into an instant 503.
 
 `authenticate`, `accountRateLimit` and `liveness` receive an optional `{ signal: AbortSignal }`
 argument (type `AbstractionCallOptions`), and `SigningContext` carries an optional `signal` —

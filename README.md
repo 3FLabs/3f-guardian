@@ -9,11 +9,11 @@ returns an EIP-712 signature that the caller submits alongside its transaction.
 
 ## Packages
 
-| Package | Path | Description |
-|---|---|---|
-| [`@3flabs/guardian`](./packages/guardian) | `packages/guardian` | HTTP shell. Hosts plug in policy, signing, and chain access via a typed `GuardianAbstractions` contract. |
-| [`@3flabs/guardian-defaults`](./packages/guardian-defaults) | `packages/guardian-defaults` | Default `Logger` (pino), in-memory rate limiter, and Appendix-A check builders. |
-| `@3flabs/guardian-test-fixtures` | `packages/guardian-test-fixtures` | **Private, never published.** Shared on-chain fixtures (prool-anvil pool + foundry artifacts + deployment script) consumed by the integration suites in both public packages. |
+| Package                                                     | Path                              | Description                                                                                                                                                                   |
+| ----------------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@3flabs/guardian`](./packages/guardian)                   | `packages/guardian`               | HTTP shell. Hosts plug in policy, signing, and chain access via a typed `GuardianAbstractions` contract.                                                                      |
+| [`@3flabs/guardian-defaults`](./packages/guardian-defaults) | `packages/guardian-defaults`      | Default `Logger` (pino), in-memory rate limiter, and Appendix-A check builders.                                                                                               |
+| `@3flabs/guardian-test-fixtures`                            | `packages/guardian-test-fixtures` | **Private, never published.** Shared on-chain fixtures (prool-anvil pool + foundry artifacts + deployment script) consumed by the integration suites in both public packages. |
 
 `@3flabs/guardian-defaults` depends on `@3flabs/guardian` via `workspace:*`. The shell never owns
 RPCs, secrets, or signing keys; the defaults package adds opinionated implementations a host can
@@ -103,7 +103,7 @@ manifests: `workspace:*` ranges become real versions, private workspace devDepen
 script errors if a private workspace package appears in `dependencies`, `peerDependencies`,
 or `optionalDependencies`.
 
-**One-time setup on npmjs.com**: add each package as an *OIDC trusted publisher* pointing at
+**One-time setup on npmjs.com**: add each package as an _OIDC trusted publisher_ pointing at
 `3FLabs/3f-guardian` repo / `release.yml` workflow. Without this, the publish step will
 fail because no `NPM_TOKEN` is configured (intentional — we don't want long-lived secrets).
 
@@ -122,7 +122,7 @@ packages/
 │   │   ├─ routes/                  one file per endpoint
 │   │   ├─ typed-data/              EIP-712 build*TypedData builders + makeSign* orchestrators
 │   │   ├─ signers/                 dev private-key envelope (host substitutes KMS/HSM in prod)
-│   │   └─ lib/                     hmac, time, request-id, checks, result, signing, logger, eip712-domain
+│   │   └─ lib/                     hmac, time, request-id, checks, result, signing, logger, eip712-domain, deadline
 │   └─ tests/
 ├─ guardian-defaults/
 │   ├─ src/

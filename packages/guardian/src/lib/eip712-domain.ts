@@ -3,6 +3,7 @@ import {
   BaseError,
   ContractFunctionRevertedError,
   ContractFunctionZeroDataError,
+  ExecutionRevertedError,
   type Address,
   type PublicClient,
 } from "viem";
@@ -73,15 +74,41 @@ export function eip712DomainCacheKey(chainId: number, verifyingContract: Address
 }
 
 /**
+ * viem's `getContractError` constructs `ContractFunctionRevertedError`
+ * not only for genuine reverts (JSON-RPC code 3) but also for any
+ * -32603 "internal error" response — the generic code many providers
+ * emit for transient node failures (overloaded backends, missing trie
+ * nodes). Only count the error as a real revert when it carries revert
+ * evidence: a raw/decoded revert payload, or an underlying cause with
+ * the unambiguous execution-reverted code (3). Everything else must
+ * stay on the retryable 503 path.
+ */
+function isGenuineRevert(err: ContractFunctionRevertedError): boolean {
+  if (err.raw !== undefined || err.data !== undefined) return true;
+  return (
+    err.walk(
+      (cause) =>
+        typeof cause === "object" &&
+        cause !== null &&
+        "code" in cause &&
+        (cause as { code: unknown }).code === ExecutionRevertedError.code,
+    ) !== null
+  );
+}
+
+/**
  * Reads `eip712Domain()` (ERC-5267) from `verifyingContract` and
  * returns `{ name, version }`.
  *
  * Read failures are discriminated on viem's cause chain:
  *  - deterministic, caller-caused failures — address with no code,
- *    contract without ERC-5267, revert — return `NotFoundError` (404,
- *    "unresolvable on-chain reference"), since the verifying contract
- *    comes verbatim from the request body and retrying cannot succeed;
- *  - transport-level failures (HTTP, timeout, RPC) return
+ *    contract without ERC-5267, genuine revert (with revert data or
+ *    JSON-RPC code 3) — return `NotFoundError` (404, "unresolvable
+ *    on-chain reference"), since the verifying contract comes verbatim
+ *    from the request body and retrying cannot succeed;
+ *  - transport-level failures (HTTP, timeout, RPC — including -32603
+ *    "internal error" responses that viem wraps in
+ *    `ContractFunctionRevertedError` without revert data) return
  *    `UpstreamUnavailableError` (503, retryable).
  * Neither client-facing message embeds the raw viem error text (it can
  * contain RPC URLs); the full error is logged via `logger` instead.
@@ -131,14 +158,17 @@ export async function fetchEip712DomainNameVersion(args: {
     );
     // viem wraps everything (including transport failures) in
     // ContractFunctionExecutionError, so walk the cause chain: only
-    // no-code / missing-function / revert causes are deterministic and
-    // caller-attributable.
+    // no-code / missing-function / genuine-revert causes are
+    // deterministic and caller-attributable. A bare
+    // ContractFunctionRevertedError is not enough — viem also builds
+    // one from -32603 "internal error" RPC responses, which are
+    // transient (see isGenuineRevert).
     const deterministic =
       e instanceof BaseError
         ? e.walk(
             (cause) =>
               cause instanceof ContractFunctionZeroDataError ||
-              cause instanceof ContractFunctionRevertedError,
+              (cause instanceof ContractFunctionRevertedError && isGenuineRevert(cause)),
           )
         : null;
     if (deterministic) {

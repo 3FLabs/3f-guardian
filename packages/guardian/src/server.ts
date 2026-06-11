@@ -33,14 +33,23 @@ import { requestWhitelistingRoute } from "./routes/request-whitelisting.js";
  * The server returned is a vanilla Elysia instance so callers retain the
  * ability to `.listen()`, `.handle()` for tests, or compose further.
  *
- * Composition caveats — guardian's request pipeline is global, so routes
- * a host adds to the returned instance inherit:
- *  - the §6.1 JSON-only content-type guard on POST / PUT (415 otherwise);
- *  - guardian's body parser for `application/json` and `text/*` bodies
- *    (other content types are left untouched for Elysia's own parser
- *    chain) and its `maxBodyBytes` cap (413 past the cap);
- *  - the `requestId` / `logger` / `rawBody` context keys, which shadow
- *    any same-named keys the host derives.
+ * Composition caveats — parts of guardian's request pipeline reach
+ * beyond the routes it defines:
+ *  - request-phase and parse-phase gates apply to the ENTIRE composed
+ *    application — every route of any app, at any depth, that `.use()`s
+ *    the guardian instance, not just routes added to the returned
+ *    instance. The §6.1 JSON-only content-type guard on POST / PUT
+ *    (415 otherwise) rides Elysia `request` events, which are not
+ *    re-scoped by `as("scoped")` and propagate unfiltered through
+ *    `.use()`; guardian's body parser for `application/json` and
+ *    `text/*` bodies plus its `maxBodyBytes` cap (413 past the cap)
+ *    ride an `onParse` hook registered `{ as: "global" }`, which
+ *    `.as("scoped")` never demotes (it only promotes local hooks).
+ *    Other content types (multipart, urlencoded, …) are left untouched
+ *    for Elysia's own parser chain everywhere, and the cap is enforced
+ *    only on the content types guardian buffers;
+ *  - the `requestId` / `logger` / `rawBody` context keys shadow any
+ *    same-named keys the host derives.
  */
 export function buildGuardianServer(abs: GuardianAbstractions) {
   return new Elysia({ name: "guardian" })

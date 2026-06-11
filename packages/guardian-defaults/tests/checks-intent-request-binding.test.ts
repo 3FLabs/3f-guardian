@@ -3,6 +3,7 @@ import {
   AbiDecodingZeroDataError,
   ContractFunctionExecutionError,
   HttpRequestError,
+  multicall3Abi,
   type Address,
   type PublicClient,
 } from "viem";
@@ -16,6 +17,7 @@ import {
 
 import { inMemoryCache } from "../src/cache/in-memory.js";
 import { requestAbi } from "../src/abi/request.js";
+import { requestFactoryAbi } from "../src/abi/request-factory.js";
 import {
   buildIntentRequestBindingChecks,
   type A1OnChainData,
@@ -58,12 +60,22 @@ type Stub = {
   multicalls: Array<{ functionNames: string[] }>;
   getLogsCalls: number;
   getBlockNumberCalls: number;
+  getBlockNumberArgs: Array<{ cacheTime?: number } | undefined>;
 };
 
 /**
  * Stub `client.multicall` + `client.getLogs` + `client.getBlockNumber`
  * with a queue of multicall responses, a getLogs handler, and a fixed
- * latest-block. Throw responses simulate RPC failure.
+ * latest-block. A whole-response Error simulates a chunk-level (RPC /
+ * aggregate3) failure: under `allowFailure: true` viem does NOT throw —
+ * it returns EVERY slot as `{ status: "failure", error }` — and only
+ * throws without allowFailure. An Error ELEMENT inside a response array
+ * simulates a per-slot failure (visible only under `allowFailure:
+ * true`, mirroring viem's wrapping).
+ *
+ * `staleLatestBlock` models viem's getBlockNumber cacheTime semantics:
+ * a call WITHOUT `cacheTime: 0` is served the stale cached head, only
+ * an uncached call observes `latestBlock`.
  */
 function makeClient(args: {
   multicallResponses?: ReadonlyArray<readonly unknown[] | Error>;
@@ -79,6 +91,7 @@ function makeClient(args: {
   }>;
   getLogsThrows?: Error;
   latestBlock?: bigint;
+  staleLatestBlock?: bigint;
   getBlockNumberThrows?: Error;
 }): Stub {
   const stub: Stub = {
@@ -86,21 +99,43 @@ function makeClient(args: {
     multicalls: [],
     getLogsCalls: 0,
     getBlockNumberCalls: 0,
+    getBlockNumberArgs: [],
   };
   let i = 0;
   const responses = args.multicallResponses ?? [];
 
   const client = {
-    multicall: async (params: { contracts: ReadonlyArray<{ functionName: string }> }) => {
+    multicall: async (params: {
+      contracts: ReadonlyArray<{ functionName: string }>;
+      allowFailure?: boolean;
+    }) => {
       stub.multicalls.push({ functionNames: params.contracts.map((c) => c.functionName) });
       const r = responses[i++];
       if (r === undefined) throw new Error(`unexpected multicall #${i}`);
+      // Mirror viem: under allowFailure a chunk-level failure is never
+      // thrown — every slot in the chunk reports the same error — and
+      // an Error element becomes a per-slot failure.
+      if (params.allowFailure === true) {
+        if (r instanceof Error) {
+          return params.contracts.map(() => ({ status: "failure", error: r }));
+        }
+        return r.map((v) =>
+          v instanceof Error ? { status: "failure", error: v } : { status: "success", result: v },
+        );
+      }
       if (r instanceof Error) throw r;
+      // Without allowFailure, viem throws the first slot's error.
+      const slotError = r.find((v) => v instanceof Error);
+      if (slotError !== undefined) throw slotError;
       return r;
     },
-    getBlockNumber: async () => {
+    getBlockNumber: async (params?: { cacheTime?: number }) => {
       stub.getBlockNumberCalls++;
+      stub.getBlockNumberArgs.push(params);
       if (args.getBlockNumberThrows) throw args.getBlockNumberThrows;
+      if (args.staleLatestBlock !== undefined && params?.cacheTime !== 0) {
+        return args.staleLatestBlock;
+      }
       return args.latestBlock ?? 100_000n;
     },
     getLogs: async (params: {
@@ -117,7 +152,11 @@ function makeClient(args: {
   return stub;
 }
 
-function ctx(client: SigningContext["client"], now = new Date(1_700_000_000_000)): SigningContext {
+function ctx(
+  client: SigningContext["client"],
+  now = new Date(1_700_000_000_000),
+  signal?: AbortSignal,
+): SigningContext {
   return {
     chainId: 1,
     client,
@@ -128,6 +167,7 @@ function ctx(client: SigningContext["client"], now = new Date(1_700_000_000_000)
       throw new Error("unreachable");
     }) as never,
     logger: noopLogger,
+    ...(signal !== undefined ? { signal } : {}),
   };
 }
 
@@ -387,7 +427,8 @@ describe("buildIntentRequestBindingChecks", () => {
       functionName: "owner",
       contractAddress: RC,
     });
-    const stub = makeClient({ multicallResponses: [eoaError] });
+    // Per-slot failure of owner() (the factory slot answers normally).
+    const stub = makeClient({ multicallResponses: [[eoaError, false]] });
     const cache = inMemoryCache<A1OnChainData>();
     const run = buildIntentRequestBindingChecks({ policy, cache });
 
@@ -408,13 +449,143 @@ describe("buildIntentRequestBindingChecks", () => {
     expect(stub.multicalls.length).toBe(1);
   });
 
-  it("keeps 503 for a transport-level multicall failure (aggregate3 HttpRequestError)", async () => {
+  it("treats a deterministic isRequest() failure on a misconfigured factory as a non-match, so a healthy factory still recognises the contract", async () => {
+    const badFactoryError = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: requestFactoryAbi,
+      functionName: "isRequest",
+      args: [RC],
+      contractAddress: OTHER_FACTORY,
+    });
+    const policyMulti: IntentRequestBindingPolicy = {
+      ...policy,
+      acceptedRequestFactories: new Map([[1, new Set<string>([OTHER_FACTORY, FACTORY])]]),
+    };
+    const stub = makeClient({
+      // First factory slot (OTHER_FACTORY, an EOA) fails per-slot; the
+      // healthy second factory answers true.
+      multicallResponses: [[OWNER, badFactoryError, true]],
+      latestBlock: 5_500n,
+      getLogs: () => [
+        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 1,
+          args: { user: PULLER, roles: ROLE_PULLER },
+        },
+        {
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 2,
+          args: { user: CONSUMER, roles: ROLE_CONSUMER },
+        },
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({ policy: policyMulti });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isOk()).toBe(true);
+  });
+
+  it("fails 503 — never a cached noFactory 422 — when a factory slot fails deterministically and no other factory matches", async () => {
+    const badFactoryError = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: requestFactoryAbi,
+      functionName: "isRequest",
+      args: [RC],
+      contractAddress: FACTORY,
+    });
+    const stub = makeClient({
+      multicallResponses: [
+        [OWNER, badFactoryError],
+        [OWNER, badFactoryError],
+      ],
+    });
+    const cache = inMemoryCache<A1OnChainData>();
+    const run = buildIntentRequestBindingChecks({ policy, cache });
+
+    const r1 = await run(ctx(stub.client), baseBody);
+    expect(r1.isErr()).toBe(true);
+    if (r1.isErr()) {
+      // Operator config error, not client error: 503, not a 422 check.
+      expect(r1.error).toBeInstanceOf(UpstreamUnavailableError);
+    }
+
+    // NOT cached — a second call re-issues the multicall instead of
+    // amortising the wrong noFactory answer.
+    const r2 = await run(ctx(stub.client), baseBody);
+    expect(r2.isErr()).toBe(true);
+    expect(stub.multicalls.length).toBe(2);
+  });
+
+  it("fetches the scan upper bound uncached (cacheTime: 0) so a stale cached head cannot hide fresh deployments or grants", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      // viem-style cacheTime semantics: a plain getBlockNumber() serves
+      // a cached head that predates the deployment + grant txs (mined
+      // at block 5_000); only `cacheTime: 0` observes the true head.
+      staleLatestBlock: 4_999n,
+      latestBlock: 5_500n,
+      getLogs: ({ fromBlock, toBlock }) =>
+        fromBlock! <= 5_000n && toBlock! >= 5_000n
+          ? [
+              {
+                eventName: "RequestCreated" as const,
+                blockNumber: 5_000n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+              {
+                eventName: "RolesUpdated" as const,
+                blockNumber: 5_000n,
+                logIndex: 1,
+                args: { user: PULLER, roles: ROLE_PULLER },
+              },
+              {
+                eventName: "RolesUpdated" as const,
+                blockNumber: 5_000n,
+                logIndex: 2,
+                args: { user: CONSUMER, roles: ROLE_CONSUMER },
+              },
+            ]
+          : [],
+    });
+    const run = buildIntentRequestBindingChecks({ policy });
+    const r = await run(ctx(stub.client), baseBody);
+    // A stale upper bound would walk [0, 4_999], miss every event, and
+    // fail-closed with "no live role-holder found".
+    expect(r.isOk()).toBe(true);
+    expect(stub.getBlockNumberArgs).toEqual([{ cacheTime: 0 }]);
+  });
+
+  it("ctx.signal abort surfaces as UpstreamUnavailableError instead of scanning to lookback exhaustion", async () => {
+    const controller = new AbortController();
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 100_000n,
+      // Abort during the first chunk — the scan must stop at the next
+      // chunk boundary instead of walking the full lookback window.
+      getLogs: () => {
+        controller.abort();
+        return [];
+      },
+    });
+    const run = buildIntentRequestBindingChecks({ policy });
+    const r = await run(ctx(stub.client, undefined, controller.signal), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
+    expect(stub.getLogsCalls).toBe(1);
+  });
+
+  it("keeps 503 — never cached — for a chunk-level multicall failure (aggregate3 HttpRequestError)", async () => {
+    // Under allowFailure: true a transport failure is not thrown by
+    // viem: every slot reports the same ContractFunctionExecutionError
+    // with functionName "aggregate3" (the multicall's own call).
     const transportError = new ContractFunctionExecutionError(
       new HttpRequestError({ url: "http://localhost:8545" }),
-      { abi: requestAbi, functionName: "owner", contractAddress: RC },
+      { abi: multicall3Abi, functionName: "aggregate3", args: [[]] },
     );
-    const stub = makeClient({ multicallResponses: [transportError] });
-    const run = buildIntentRequestBindingChecks({ policy });
+    const stub = makeClient({ multicallResponses: [transportError, transportError] });
+    const cache = inMemoryCache<A1OnChainData>();
+    const run = buildIntentRequestBindingChecks({ policy, cache });
     const r = await run(ctx(stub.client), baseBody);
     expect(r.isErr()).toBe(true);
     if (r.isErr()) {
@@ -424,6 +595,12 @@ describe("buildIntentRequestBindingChecks", () => {
       expect(message).toBe("request-contract read failed upstream");
       expect(message).not.toContain("localhost:8545");
     }
+
+    // NOT cached — a second call re-issues the multicall instead of
+    // amortising a transient transport failure.
+    const r2 = await run(ctx(stub.client), baseBody);
+    expect(r2.isErr()).toBe(true);
+    expect(stub.multicalls.length).toBe(2);
   });
 
   it("revoking a role (RolesUpdated with roles=0) prunes the holder", async () => {
@@ -856,6 +1033,24 @@ describe("scanRoleHolders", () => {
         now: () => clock,
       }),
     ).rejects.toThrow(/exceeded its 15ms budget/);
+  });
+
+  it("stops at the next chunk boundary when the request signal aborts", async () => {
+    const controller = new AbortController();
+    const { client, spans } = recordingClient({ onGetLogs: () => controller.abort() });
+    await expect(
+      scanRoleHolders({
+        client,
+        factory: FACTORY,
+        requestContract: RC,
+        latestBlock: 10_000n,
+        blockRange: 1_000n,
+        maxLookbackBlocks: 5_000n,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow(/aborted by the request signal/);
+    // Aborted after chunk 1 — no further getLogs round-trips.
+    expect(spans.length).toBe(1);
   });
 
   it("eventScanDeadlineMs surfaces as UpstreamUnavailableError through the runner", async () => {

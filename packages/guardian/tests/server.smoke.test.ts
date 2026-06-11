@@ -1,9 +1,11 @@
 import { Result } from "better-result";
+import { Elysia } from "elysia";
 import { describe, expect, it } from "vitest";
 
 import {
   buildGuardianServer,
   ENDPOINT_SCOPES,
+  RateLimitedError,
   UnauthenticatedError,
   UpstreamUnavailableError,
   type GuardianAbstractions,
@@ -311,6 +313,61 @@ describe("abstraction deadlines", () => {
     expect(body.error).toBe("upstream_unavailable");
     expect(seen?.aborted).toBe(true);
   });
+
+  it("bounds a hung accountRateLimit() with 503 and aborts the forwarded signal", async () => {
+    let seen: AbortSignal | undefined;
+    const app = buildGuardianServer(
+      stubAbstractions({
+        accountRateLimit: (_info, options) => {
+          seen = options?.signal;
+          return new Promise(() => {});
+        },
+        timeouts: { rateLimitMs: 50 },
+      }),
+    );
+    // The stub's default authenticate accepts "Bearer valid", so the
+    // request reaches the rate-limit branch.
+    const res = await app.handle(postBinding());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("upstream_unavailable");
+    expect(body.message).toContain("accountRateLimit");
+    expect(seen?.aborted).toBe(true);
+  });
+
+  it("a fast Err(RateLimitedError) still maps to 429 + Retry-After under the deadline wrapper", async () => {
+    const app = buildGuardianServer(
+      stubAbstractions({
+        accountRateLimit: async () =>
+          Result.err(new RateLimitedError({ message: "slow down", retryAfterSeconds: 7 })),
+      }),
+    );
+    const res = await app.handle(postBinding());
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("7");
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("rate_limited");
+  });
+});
+
+describe("construction-time validation", () => {
+  it.each([Number.NaN, 0, -1, 1.5])(
+    "rejects maxBodyBytes = %s loudly at construction",
+    (maxBodyBytes) => {
+      expect(() => buildGuardianServer(stubAbstractions({ maxBodyBytes }))).toThrow(
+        /maxBodyBytes must be a positive integer/,
+      );
+    },
+  );
+
+  it("rejects NaN / non-positive timeout overrides loudly at construction", () => {
+    expect(() =>
+      buildGuardianServer(stubAbstractions({ timeouts: { authenticateMs: Number.NaN } })),
+    ).toThrow(/timeouts\.authenticateMs must be a positive finite number/);
+    expect(() => buildGuardianServer(stubAbstractions({ timeouts: { signMs: 0 } }))).toThrow(
+      /timeouts\.signMs must be a positive finite number/,
+    );
+  });
 });
 
 describe("body size cap", () => {
@@ -337,6 +394,75 @@ describe("body size cap", () => {
     const res = await app.handle(postBinding());
     expect(res.status).toBe(200);
   });
+
+  it("rejects an oversized declared Content-Length before buffering or authentication", async () => {
+    let authCalls = 0;
+    const app = buildGuardianServer(
+      stubAbstractions({
+        authenticate: async () => {
+          authCalls++;
+          return Result.err(new UnauthenticatedError({ message: "nope" }));
+        },
+        maxBodyBytes: 256,
+      }),
+    );
+    // The actual body is well under the 256-byte cap, so a 413 can only
+    // come from the declared-length fast path.
+    const res = await app.handle(postBinding({ headers: { "content-length": "9999" } }));
+    expect(res.status).toBe(413);
+    expect(authCalls).toBe(0);
+    const body = (await res.json()) as { error: string; requestId: string };
+    expect(body.error).toBe("bad_request");
+    expect(body.requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    expect(res.headers.get("X-Request-Id")).toBe(body.requestId);
+  });
+
+  it("does not apply the cap to host routes whose content types guardian never buffers", async () => {
+    // Guardian's body cap must only gate the content types it buffers
+    // (application/json, text/*) — a host urlencoded route declaring an
+    // oversized Content-Length must reach the host's own parser chain,
+    // not 413, even when composed at the parent-app level (request-phase
+    // gates are never re-scoped by Elysia, so a cap there would fire on
+    // every route of the composed app).
+    const host = new Elysia()
+      .use(buildGuardianServer(stubAbstractions({ maxBodyBytes: 256 })))
+      .patch("/host-upload", ({ body }) => body as Record<string, string>, {
+        parse: "urlencoded",
+      });
+    const res = await host.handle(
+      new Request("http://localhost/host-upload", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "content-length": "9999",
+        },
+        body: "a=1&b=2",
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ a: "1", b: "2" });
+  });
+
+  it("applies the cap to a parent app's own JSON routes (the parse hook is global)", async () => {
+    // The body parser + cap ride an onParse hook registered
+    // { as: "global" }, which `.as("scoped")` never demotes — so JSON
+    // routes the HOST adds next to the guardian instance are capped
+    // too, not just routes added to the returned instance.
+    const host = new Elysia()
+      .use(buildGuardianServer(stubAbstractions({ maxBodyBytes: 256 })))
+      .post("/parent-json", ({ body }) => body);
+    const res = await host.handle(
+      new Request("http://localhost/parent-json", {
+        method: "POST",
+        headers: { "content-type": "application/json", "content-length": "9999" },
+        body: JSON.stringify({ small: true }),
+      }),
+    );
+    expect(res.status).toBe(413);
+    expect(((await res.json()) as { error: string }).error).toBe("bad_request");
+  });
 });
 
 describe("§6.2 client-identification headers", () => {
@@ -354,6 +480,29 @@ describe("§6.2 client-identification headers", () => {
         body: JSON.stringify(VALID_BINDING_BODY),
       }),
     );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("bad_request");
+  });
+
+  it("rejects an authenticated request missing X-Client-Version with 400", async () => {
+    const res = await app.handle(
+      new Request("http://localhost/v1/facility/intent-request-bindings", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer valid",
+          "x-client-name": "smoke-tests",
+        },
+        body: JSON.stringify(VALID_BINDING_BODY),
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("bad_request");
+  });
+
+  it("rejects an authenticated request with a malformed X-Client-Version with 400", async () => {
+    const res = await app.handle(postBinding({ headers: { "x-client-version": "banana" } }));
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("bad_request");

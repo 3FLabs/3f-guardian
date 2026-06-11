@@ -1,4 +1,4 @@
-import { pino } from "pino";
+import { symbols as pinoSymbols } from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_REDACT_PATHS, pinoLogger } from "../src/logger/pino.js";
@@ -85,20 +85,22 @@ describe("pinoLogger LOG_LEVEL handling", () => {
   });
 });
 
-describe("DEFAULT_REDACT_PATHS", () => {
-  // Drives a raw pino instance configured exactly like pinoLogger's
-  // default (`redact: { paths, remove: false }`) into an in-memory
-  // destination so emitted NDJSON can be asserted on.
+describe("DEFAULT_REDACT_PATHS via the real pinoLogger factory", () => {
+  // Drives the REAL pinoLogger() — not a hand-built replica — so the
+  // suite fails if the factory ever stops wiring DEFAULT_REDACT_PATHS
+  // into the instance it returns. pino exposes its destination on the
+  // instance via the public `pino.symbols.streamSym`; swapping it for
+  // an in-memory sink captures the actual emitted NDJSON. (Spying on
+  // process.stdout.write would not work: pino's default destination is
+  // a sonic-boom stream writing straight to fd 1.)
   function captureLogger() {
     const lines: string[] = [];
-    const log = pino(
-      { level: "trace", base: null, redact: { paths: [...DEFAULT_REDACT_PATHS], remove: false } },
-      {
-        write(chunk: string) {
-          lines.push(chunk);
-        },
+    const log = pinoLogger({ pretty: false, level: "trace" });
+    (log as unknown as Record<symbol, unknown>)[pinoSymbols.streamSym] = {
+      write(chunk: string) {
+        lines.push(chunk);
       },
-    );
+    };
     return { log, lines };
   }
 
@@ -119,6 +121,7 @@ describe("DEFAULT_REDACT_PATHS", () => {
     expect(out).not.toContain("leak-pk-0");
     expect(out).not.toContain("leak-pk-1");
     expect(out).not.toContain("leak-pk-2");
+    expect(out.match(/\[Redacted\]/g)).toHaveLength(3);
   });
 
   it("masks secret / hmacSecret at every depth up to two levels", () => {
@@ -131,6 +134,60 @@ describe("DEFAULT_REDACT_PATHS", () => {
     const out = lines.join("");
     for (const leak of ["leak-s-0", "leak-s-1", "leak-s-2", "leak-h-0", "leak-h-1"]) {
       expect(out).not.toContain(leak);
+    }
+    expect(out.match(/\[Redacted\]/g)).toHaveLength(5);
+  });
+
+  it("masks the signature headers the Guardian transport stamps on requests", () => {
+    const { log, lines } = captureLogger();
+    log.info({
+      headers: {
+        authorization: "Bearer leak-bearer",
+        "x-guardian-signature": "leak-sig",
+        "x-guardian-timestamp": "leak-ts",
+      },
+    });
+    const out = lines.join("");
+    expect(out).not.toContain("leak-bearer");
+    expect(out).not.toContain("leak-sig");
+    expect(out).not.toContain("leak-ts");
+  });
+
+  it("keeps redacting through child loggers", () => {
+    const { log, lines } = captureLogger();
+    const child = log.child({ requestId: "r-1" });
+    child.info({ signer: { privateKey: "leak-child" } }, "signing");
+    const out = lines.join("");
+    expect(out).not.toContain("leak-child");
+    expect(out).toContain("[Redacted]");
+  });
+
+  it("redacts every DEFAULT_REDACT_PATHS literal (non-wildcard) path", () => {
+    // Data-level complement: each concrete path in the exported list is
+    // honoured by the factory-built instance, so the list itself cannot
+    // silently rot.
+    const literalPaths = DEFAULT_REDACT_PATHS.filter((p) => !p.includes("*"));
+    expect(literalPaths.length).toBeGreaterThan(0);
+    for (const path of literalPaths) {
+      const { log, lines } = captureLogger();
+      // Build a nested object matching the path, e.g.
+      // "headers['x-guardian-signature']" → { headers: { "x-guardian-signature": … } }.
+      const segments = path.split(".").flatMap((seg) => {
+        const bracket = /^(\w+)\['([^']+)'\]$/.exec(seg);
+        return bracket ? [bracket[1] as string, bracket[2] as string] : [seg];
+      });
+      const payload: Record<string, unknown> = {};
+      let cursor = payload;
+      for (const key of segments.slice(0, -1)) {
+        const next: Record<string, unknown> = {};
+        cursor[key] = next;
+        cursor = next;
+      }
+      cursor[segments[segments.length - 1] as string] = "leak-literal";
+      log.info(payload);
+      const out = lines.join("");
+      expect(out, `path ${path} leaked`).not.toContain("leak-literal");
+      expect(out, `path ${path} not censored`).toContain("[Redacted]");
     }
   });
 });

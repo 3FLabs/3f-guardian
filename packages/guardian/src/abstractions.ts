@@ -344,11 +344,14 @@ export type GuardianAbstractions = {
 
   /**
    * Optional cap (bytes) on request bodies the shell buffers for §5.4
-   * HMAC verification and JSON parsing. Default 1 MiB. Bodies that
-   * declare or stream past the cap are rejected with
-   * `413` (`bad_request` envelope) before authentication — every
-   * legitimate v1 body is a small JSON document. Hosts deploying via
-   * `Bun.serve` SHOULD additionally set `maxRequestBodySize` as a
+   * HMAC verification and JSON parsing. Default 1 MiB. Must be a
+   * positive integer — anything else throws at construction. Bodies
+   * that declare or stream past the cap are rejected with `413`
+   * (`bad_request` envelope) before authentication — every legitimate
+   * v1 body is a small JSON document. Only the content types guardian
+   * buffers (`application/json`, `text/*`) are capped; host-composed
+   * routes accepting other media types are unaffected. Hosts deploying
+   * via `Bun.serve` SHOULD additionally set `maxRequestBodySize` as a
    * transport-level backstop.
    */
   readonly maxBodyBytes?: number;

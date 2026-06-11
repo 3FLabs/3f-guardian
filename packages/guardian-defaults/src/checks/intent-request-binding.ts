@@ -16,6 +16,7 @@ import {
   checkMembership,
   failed,
   isDeterministicContractCallFailure,
+  isMulticallChunkFailure,
   passed,
   rollUp,
   skipped,
@@ -159,7 +160,7 @@ export type A1Deps = {
  *   4. consumer role on request contract is held only by accepted parties (422)
  *   5. deadline within MAX_DEADLINE_SECONDS_AHEAD of now              (422)
  *
- * Stage 1 — single multicall (`allowFailure: false`):
+ * Stage 1 — single multicall (`allowFailure: true`):
  *   - `request.owner()`
  *   - `factory.isRequest(requestContract)` for each accepted factory
  *
@@ -176,13 +177,20 @@ export type A1Deps = {
  *     observed inside the scanned window, otherwise follow the
  *     policy's `onLookbackExhausted` disposition (default: skipped).
  *
- * `allowFailure: false` means a transport-level RPC failure surfaces as
- * `UpstreamUnavailableError` (503), per §6.6. A DETERMINISTIC failure
- * of the stage-1 reads — `owner()` / `isRequest()` reverting or
- * returning no data because the client-supplied `requestContract` is an
- * EOA or some unrelated contract — is instead classified as
- * `noFactory` (an EOA is by definition not "deployed by an accepted
- * factory"), which is cached and rolls up to a 422 check failure.
+ * Stage 1 uses `allowFailure: true` so each slot is classified on its
+ * own. A transport-level RPC failure (the aggregate3 call itself)
+ * surfaces as `UpstreamUnavailableError` (503), per §6.6. A
+ * DETERMINISTIC failure of the client-attributable `owner()` slot —
+ * reverting or returning no data because the client-supplied
+ * `requestContract` is an EOA or some unrelated contract — is instead
+ * classified as `noFactory` (an EOA is by definition not "deployed by
+ * an accepted factory"), which is cached and rolls up to a 422 check
+ * failure. A deterministic failure of an OPERATOR-configured factory's
+ * `isRequest()` slot is a configuration error, not a client error: the
+ * slot is treated as a non-match and logged at error level, and if no
+ * healthy factory matches either the request fails 503 (never cached)
+ * so the misconfiguration stays an operator-visible alarm instead of a
+ * chain-wide stream of client-blamed 422s.
  *
  * Optional cache: when `deps.cache` is supplied the on-chain reads are
  * bypassed on hit; see {@link A1Deps} for behaviour and {@link A1OnChainData}
@@ -283,7 +291,16 @@ async function fetchA1OnChain(
   // factory reads) defeats viem's const-tuple inference. We type-erase
   // the contracts param and cast the results — runtime decoding is
   // unaffected.
-  let stage1Results: readonly [Address, ...boolean[]];
+  //
+  // `allowFailure: true` so each slot is classified independently: a
+  // deterministic failure of the client-supplied contract's `owner()`
+  // is the client's fault (noFactory, 422), but a deterministic failure
+  // of an OPERATOR-configured factory's `isRequest()` must never be —
+  // otherwise one misconfigured factory entry (EOA / wrong contract)
+  // would silently convert every request on the chain into a cached
+  // client-blamed 422.
+  type Stage1Slot<T> = { status: "success"; result: T } | { status: "failure"; error: Error };
+  let stage1Results: readonly [Stage1Slot<Address>, ...Stage1Slot<boolean>[]];
   try {
     stage1Results = (await ctx.client.multicall({
       contracts: [
@@ -295,24 +312,14 @@ async function fetchA1OnChain(
           args: [requestContract] as const,
         })),
       ] as never,
-      allowFailure: false,
-    })) as unknown as readonly [Address, ...boolean[]];
+      allowFailure: true,
+    })) as unknown as readonly [Stage1Slot<Address>, ...Stage1Slot<boolean>[]];
   } catch (e) {
-    // A deterministic per-slot failure (revert / empty return data on
-    // `owner()` or `isRequest()`) means the client-supplied contract —
-    // or, for isRequest, an operator-configured factory — is not the
-    // contract we expect: an EOA cannot have been deployed by an
-    // accepted factory. Classify as `noFactory` (cached, 422) instead
-    // of polluting upstream-health signals with a 503. Transport-level
-    // failures (RPC down, timeout, the aggregate3 call itself) keep the
-    // 503 path and are never cached.
-    if (isDeterministicContractCallFailure(e, ["owner", "isRequest"])) {
-      ctx.logger.warn(
-        { err: e instanceof Error ? e.message : e, requestContract },
-        "A.1: stage 1 read reverted or returned no data; treating as noFactory",
-      );
-      return Result.ok({ kind: "noFactory" });
-    }
+    // Synchronous setup failure (multicall3 address not configured for
+    // the chain, results-length mismatch). Transport failures do NOT
+    // land here under `allowFailure: true` — they surface as per-slot
+    // failures with `functionName: "aggregate3"`, handled in the slot
+    // branches below. Keep the 503 path; never cached.
     ctx.logger.error(
       { err: e instanceof Error ? e.message : e, requestContract },
       "A.1: stage 1 multicall failed",
@@ -325,23 +332,94 @@ async function fetchA1OnChain(
     );
   }
 
-  const owner = stage1Results[0];
-  const factoryHits = factoriesArr
-    .map((factory, i) => ({ factory, isRequest: stage1Results[i + 1] === true }))
-    .filter((h) => h.isRequest);
+  const ownerSlot = stage1Results[0];
+  if (ownerSlot.status === "failure") {
+    // A deterministic failure of `owner()` (revert / empty return data)
+    // means the client-supplied contract is an EOA or some unrelated
+    // contract: it cannot have been deployed by an accepted factory.
+    // Classify as `noFactory` (cached, 422) instead of polluting
+    // upstream-health signals with a 503. Anything unclassifiable keeps
+    // the 503 path and is never cached.
+    if (isDeterministicContractCallFailure(ownerSlot.error, ["owner"])) {
+      ctx.logger.warn(
+        { err: ownerSlot.error.message, requestContract },
+        "A.1: owner() reverted or returned no data; treating as noFactory",
+      );
+      return Result.ok({ kind: "noFactory" });
+    }
+    ctx.logger.error(
+      { err: ownerSlot.error.message, requestContract },
+      isMulticallChunkFailure(ownerSlot.error)
+        ? "A.1: stage 1 multicall failed upstream (transport)"
+        : "A.1: owner() read failed",
+    );
+    return Result.err(
+      new UpstreamUnavailableError({
+        message: "request-contract read failed upstream",
+        status: 503,
+      }),
+    );
+  }
+  const owner = ownerSlot.result;
+
+  const factoryHits: Address[] = [];
+  const failedFactories: Address[] = [];
+  for (const [i, factory] of factoriesArr.entries()) {
+    const slot = stage1Results[i + 1]!;
+    if (slot.status === "failure") {
+      // The factory address comes from OPERATOR configuration, not from
+      // the client. A deterministic failure here (EOA / non-factory
+      // contract) is a deploy-time config error: log it loudly and
+      // treat the slot as a non-match so a healthy factory in the same
+      // set can still recognise the contract. A chunk-level failure
+      // (the aggregate3 call itself) is upstream health, not operator
+      // config — log it without the configuration hint.
+      ctx.logger.error(
+        { err: slot.error.message, factory, requestContract },
+        isMulticallChunkFailure(slot.error)
+          ? "A.1: factory isRequest() read failed upstream (transport)"
+          : "A.1: accepted factory did not answer isRequest(); " +
+              "check the acceptedRequestFactories configuration",
+      );
+      failedFactories.push(factory);
+      continue;
+    }
+    if (slot.result === true) factoryHits.push(factory);
+  }
 
   if (factoryHits.length === 0) {
+    if (failedFactories.length > 0) {
+      // Without a definitive answer from every configured factory we
+      // cannot distinguish "no factory deployed this contract" (client
+      // error, cacheable) from "the factory that DID deploy it is the
+      // one we failed to read". Fail 503 so the misconfiguration stays
+      // an operator-visible alarm and the wrong `noFactory` answer is
+      // never amortised by the cache.
+      return Result.err(
+        new UpstreamUnavailableError({
+          message: "accepted-factory read failed upstream",
+          status: 503,
+        }),
+      );
+    }
     return Result.ok({ kind: "noFactory" });
   }
 
   // Pick the (sole) factory that returned true. If multiple did
   // (configuration error), pick the first deterministically.
-  const factory = factoryHits[0]!.factory;
+  const factory = factoryHits[0]!;
 
   // ── Stage 2: role-events scan ────────────────────────────────────
   let latestBlock: bigint;
   try {
-    latestBlock = await ctx.client.getBlockNumber();
+    // `cacheTime: 0` forces an uncached eth_blockNumber. viem caches
+    // getBlockNumber results for `cacheTime` (default: the client's
+    // pollingInterval, 4s), and a stale cached block number must never
+    // bound a security scan: grants mined inside the cached window
+    // would be invisible to the replay (fail-open for rogue grants),
+    // and a freshly-deployed contract's events would be missed
+    // entirely (spurious 422s).
+    latestBlock = await ctx.client.getBlockNumber({ cacheTime: 0 });
   } catch (e) {
     ctx.logger.error({ err: e instanceof Error ? e.message : e }, "A.1: getBlockNumber failed");
     return Result.err(
@@ -362,6 +440,11 @@ async function fetchA1OnChain(
       blockRange: policy.eventScanBlockRange,
       maxLookbackBlocks: policy.eventScanMaxLookbackBlocks,
       deadlineMs: policy.eventScanDeadlineMs,
+      // Abort at the next chunk boundary once the shell's signMs
+      // deadline has expired — the caller already got a 503, so the
+      // scan must not keep walking the chain in the background (each
+      // client retry would stack another full concurrent scan).
+      signal: ctx.signal,
     });
   } catch (e) {
     ctx.logger.error(

@@ -73,6 +73,7 @@ function makeClient(args: {
   const client = {
     multicall: async (params: {
       contracts: ReadonlyArray<{ functionName: string; address: string }>;
+      allowFailure?: boolean;
     }) => {
       stub.multicalls.push({
         functionNames: params.contracts.map((c) => c.functionName),
@@ -81,6 +82,16 @@ function makeClient(args: {
       const r = responses[i++];
       if (r === undefined) throw new Error(`unexpected multicall #${i}`);
       if (r instanceof Error) throw r;
+      // Mirror viem: under allowFailure (the §A.1 stage-1 read) each
+      // slot is wrapped; an Error element is a per-slot failure.
+      if (params.allowFailure === true) {
+        return r.map((v) =>
+          v instanceof Error ? { status: "failure", error: v } : { status: "success", result: v },
+        );
+      }
+      // Without allowFailure, viem throws the first slot's error.
+      const slotError = r.find((v) => v instanceof Error);
+      if (slotError !== undefined) throw slotError;
       return r;
     },
     getBlockNumber: async () => {

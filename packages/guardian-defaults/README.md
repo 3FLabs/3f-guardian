@@ -496,12 +496,16 @@ limit equal to the configured range never reject a chunk.
 - **Scan budget** — `eventScanDeadlineMs` (optional) bounds a single scan's wall clock;
   when exceeded the request fails `503 upstream_unavailable` instead of holding the
   handler indefinitely.
-- **422 vs 503** — deterministic `owner()` / `isRequest()` failures (e.g. an EOA or
-  unrelated contract supplied as `requestContract`) are classified as a cached `noFactory`
-  result that fails the "deployed by an accepted factory" check (422). Likewise a
-  `whitelistBook` whose nonce reads deterministically revert or return no data (e.g. an
-  EOA) fails a 422 "whitelist book exposes per-validator nonce state" check.
-  `503 upstream_unavailable` is reserved for genuine transport-level RPC failures.
+- **422 vs 503** — a deterministic `owner()` failure (revert / no return data, e.g. an EOA
+  or unrelated contract supplied as `requestContract`) is classified as a cached `noFactory`
+  result that fails the "deployed by an accepted factory" check (422). A deterministic
+  `isRequest()` failure on an operator-configured accepted factory is a configuration
+  error, not a client error: it is logged at error level and treated as a non-match, and if
+  no healthy factory recognises the contract the request fails `503 upstream_unavailable`
+  and is never cached. Likewise a `whitelistBook` whose nonce reads deterministically revert
+  or return no data (e.g. an EOA) fails a 422 "whitelist book exposes per-validator nonce
+  state" check. `503 upstream_unavailable` covers genuine transport-level RPC failures and
+  the failed-factory-slot case above.
 - **§A.4 request guards** — before any RPC: a `requestContracts` batch larger than
   `maxRequestContracts` (default `DEFAULT_MAX_REQUEST_CONTRACTS = 50`, exported from
   `@3flabs/guardian-defaults/checks`) fails a 422 check for both whitelist and unwhitelist

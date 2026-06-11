@@ -65,6 +65,21 @@ export function isDeterministicContractCallFailure(
 }
 
 /**
+ * Classifies a failed `multicall({ allowFailure: true })` slot as a
+ * CHUNK-level failure: the aggregate3 call itself failed (transport
+ * outage, timeout, or the multicall contract reverting), so every slot
+ * in the chunk carries the same error. viem wraps slot-local
+ * decode/revert failures with the slot's own `functionName` (`owner`,
+ * `isRequest`, …) via `getContractError`, and chunk-level failures with
+ * `functionName: "aggregate3"`, so keying on the name is exact. Use it
+ * to route logging: a chunk failure is upstream health, never an
+ * operator-configuration or client-input problem.
+ */
+export function isMulticallChunkFailure(e: unknown): boolean {
+  return e instanceof ContractFunctionExecutionError && e.functionName === "aggregate3";
+}
+
+/**
  * §A.* set-membership predicate. Compares case-insensitively for
  * EVM addresses and case-sensitively for everything else.
  *
