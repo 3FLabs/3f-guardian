@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { type Address, zeroAddress } from "viem";
+import {
+  AbiDecodingZeroDataError,
+  ContractFunctionExecutionError,
+  HttpRequestError,
+  type Address,
+  zeroAddress,
+} from "viem";
 
 import {
   noopLogger,
@@ -9,6 +15,7 @@ import {
   type SigningContext,
 } from "@3flabs/guardian";
 
+import { facilityAbi, fundAbi } from "../src/abi/index.js";
 import {
   buildIntentFundBindingChecks,
   type IntentFundBindingPolicy,
@@ -44,10 +51,15 @@ function getIntentResult(args: {
   fund: Address;
   request?: Address;
   resolved?: boolean;
+  depositAsset?: { asset: Address; isPositionManager: boolean };
+  targetAsset?: { asset: Address; isPositionManager: boolean };
 }): readonly [unknown, Address, Address, boolean] {
   const properties = {
-    depositAsset: { asset: zeroAddress as Address, isPositionManager: false },
-    targetAsset: { asset: zeroAddress as Address, isPositionManager: true },
+    depositAsset: args.depositAsset ?? { asset: zeroAddress as Address, isPositionManager: false },
+    // Default mirrors the body fixture: the intent's PM-flagged asset
+    // IS the proposed `positionManager`, so the §A.2 PM-match check
+    // passes unless a test overrides it.
+    targetAsset: args.targetAsset ?? { asset: PM, isPositionManager: true },
     depositCap: 0n,
     guardKey: zeroAddress as Address,
     resolveStart: 0,
@@ -125,6 +137,7 @@ describe("buildIntentFundBindingChecks", () => {
       const checks = (r.error as ValidationFailedError).checks;
       expect(checks.filter((c) => c.skipped === true).map((c) => c.description)).toEqual([
         "fund contract owner is on the accepted-owners list",
+        "proposed position manager matches the intent's position-manager asset",
         "intent has no currently bound fund",
         "fund holds DEPOSITOR_ROLE for the facility",
       ]);
@@ -142,6 +155,64 @@ describe("buildIntentFundBindingChecks", () => {
     const r = await run(ctx(client), baseBody);
     expect(r.isErr()).toBe(true);
     if (r.isErr()) expect(r.error).toBeInstanceOf(ValidationFailedError);
+  });
+
+  it("returns 422 when the proposed position manager is not the intent's PM-flagged asset", async () => {
+    const stage1 = [
+      FUND_OWNER,
+      getIntentResult({
+        fund: zeroAddress as Address,
+        targetAsset: { asset: SOME_FUND, isPositionManager: true }, // ≠ baseBody.positionManager
+      }),
+    ];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const pm = (r.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("position-manager asset"),
+      );
+      expect(pm?.passed).toBe(false);
+      expect(pm?.reason).toContain(SOME_FUND);
+    }
+  });
+
+  it("accepts the position manager when it matches the deposit-asset side", async () => {
+    const stage1 = [
+      FUND_OWNER,
+      getIntentResult({
+        fund: zeroAddress as Address,
+        depositAsset: { asset: PM, isPositionManager: true },
+        targetAsset: { asset: SOME_FUND, isPositionManager: false },
+      }),
+    ];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isOk()).toBe(true);
+  });
+
+  it("returns 422 when the intent declares no position-manager asset at all", async () => {
+    const stage1 = [
+      FUND_OWNER,
+      getIntentResult({
+        fund: zeroAddress as Address,
+        targetAsset: { asset: SOME_FUND, isPositionManager: false },
+      }),
+    ];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const pm = (r.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("position-manager asset"),
+      );
+      expect(pm?.reason).toMatch(/declares no position-manager asset/);
+    }
   });
 
   it("returns 409 (StateConflictError) when only the current-fund check fails", async () => {
@@ -191,6 +262,72 @@ describe("buildIntentFundBindingChecks", () => {
     const r = await run(ctx(client), baseBody);
     expect(r.isErr()).toBe(true);
     if (r.isErr()) expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
+  });
+
+  it("treats a deterministic owner() decode failure (EOA fund contract) as a 422 check failure, not a 503", async () => {
+    const eoaError = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: fundAbi,
+      functionName: "owner",
+      contractAddress: FUND,
+    });
+    const { client, calls } = makeClient([eoaError]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const checks = (r.error as ValidationFailedError).checks;
+      const owner = checks.find((c) => c.description.includes("accepted-owners"));
+      expect(owner?.passed).toBe(false);
+      expect(owner?.reason).toMatch(/did not answer owner\(\)/);
+      // Downstream on-chain entries are unknowable — emitted as skipped.
+      expect(checks.filter((c) => c.skipped === true).map((c) => c.description)).toEqual([
+        "proposed position manager matches the intent's position-manager asset",
+        "intent has no currently bound fund",
+        "fund holds DEPOSITOR_ROLE for the facility",
+      ]);
+    }
+    expect(calls).toHaveLength(1);
+  });
+
+  it("treats a deterministic getIntent() decode failure (EOA facility) as a 422 check failure, not a 503", async () => {
+    const eoaError = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: facilityAbi,
+      functionName: "getIntent",
+      args: [1n],
+      contractAddress: FACILITY,
+    });
+    const { client } = makeClient([eoaError]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      expect(r.error).not.toBeInstanceOf(StateConflictError);
+      const owner = (r.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("accepted-owners"),
+      );
+      expect(owner?.passed).toBe(false);
+      expect(owner?.reason).toMatch(/did not answer getIntent/);
+    }
+  });
+
+  it("keeps 503 for a transport-level multicall failure without leaking the upstream error text", async () => {
+    const transportError = new ContractFunctionExecutionError(
+      new HttpRequestError({ url: "http://internal-rpc.example:8545" }),
+      { abi: fundAbi, functionName: "owner", contractAddress: FUND },
+    );
+    const { client } = makeClient([transportError]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
+      const message = (r.error as UpstreamUnavailableError).message;
+      expect(message).toBe("fund-binding read failed upstream");
+      expect(message).not.toContain("internal-rpc.example");
+      expect(message).not.toContain(transportError.message);
+    }
   });
 
   it("rejects when the deadline exceeds the policy ceiling", async () => {

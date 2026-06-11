@@ -3,19 +3,31 @@ import { Elysia } from "elysia";
 import type { GuardianAbstractions } from "../abstractions.js";
 import { zHealthResponse } from "../schemas/health.js";
 import { errorResponses } from "../schemas/responses.js";
+import { resolveGuardianTimeouts, withAbstractionDeadline } from "../lib/deadline.js";
+import { noopLogger } from "../lib/logger.js";
 import { unwrapOrThrow } from "../lib/result.js";
 
 /**
  * §7.1 — liveness probe. 200 iff prepared to accept authenticated requests;
  * 503 otherwise (signing key lost, all RPCs down, etc.).
  *
- * Unauthenticated and not subject to HMAC requirements.
+ * Unauthenticated and not subject to HMAC requirements. The host's
+ * `liveness()` is bounded by the `livenessMs` deadline so a hung probe
+ * fails fast with 503 instead of hanging the load balancer's check.
  */
 export function healthRoute(abs: GuardianAbstractions) {
+  const timeouts = resolveGuardianTimeouts(abs.timeouts);
+  const log = abs.logger ?? noopLogger;
   return new Elysia({ name: "guardian:route:health" }).get(
     "/health",
     async () => {
-      unwrapOrThrow(await abs.liveness());
+      unwrapOrThrow(
+        await withAbstractionDeadline((signal) => abs.liveness({ signal }), {
+          ms: timeouts.livenessMs,
+          abstraction: "liveness",
+          logger: log,
+        }),
+      );
       return { status: "ok" } as const;
     },
     {

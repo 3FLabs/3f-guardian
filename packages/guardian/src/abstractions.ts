@@ -11,6 +11,7 @@ import type {
   UpstreamUnavailableError,
 } from "./errors/tagged.js";
 
+import type { GuardianTimeouts } from "./lib/deadline.js";
 import type { Logger } from "./lib/logger.js";
 import type { IntentRequestBindingBody } from "./schemas/intent-request-binding.js";
 import type { IntentFundBindingBody } from "./schemas/intent-fund-binding.js";
@@ -21,6 +22,20 @@ import type {
 } from "./schemas/request-whitelisting.js";
 import type { SigningSuccess } from "./schemas/responses.js";
 import type { VersionResponse } from "./schemas/version.js";
+
+// ─── Call options ──────────────────────────────────────────────────────────
+
+/**
+ * Options the shell forwards to every host-supplied async abstraction
+ * call. `signal` aborts when the per-call deadline (see
+ * {@link GuardianTimeouts}) expires; implementations SHOULD forward it
+ * to their I/O so a timed-out call stops consuming resources. Ignoring
+ * it is safe — the shell also races the call against the deadline and
+ * responds `503 upstream_unavailable` regardless.
+ */
+export type AbstractionCallOptions = {
+  readonly signal: AbortSignal;
+};
 
 // ─── Authentication ────────────────────────────────────────────────────────
 
@@ -119,6 +134,10 @@ export type SignTypedData = <
  *   chainId }`. Abstraction implementations SHOULD use it for any
  *   per-request log emission so records correlate with the shell's own
  *   logs without duplicate context plumbing.
+ * - `signal` (when present) aborts once the `signMs` deadline (see
+ *   {@link GuardianTimeouts}) expires. Implementations SHOULD forward it
+ *   to on-chain reads / KMS calls so a timed-out request stops consuming
+ *   resources; the shell responds 503 on expiry either way.
  */
 export type SigningContext = {
   readonly chainId: number;
@@ -128,6 +147,7 @@ export type SigningContext = {
   readonly now: Date;
   readonly signTypedData: SignTypedData;
   readonly logger: Logger;
+  readonly signal?: AbortSignal;
 };
 
 // ─── Generic shape of every validate-and-sign abstraction ─────────────────
@@ -207,8 +227,13 @@ export type GuardianMetadata = Omit<VersionResponse, "apiVersion">;
  * Liveness predicate for §7.1. Implementations SHOULD return false if the
  * Guardian has lost access to its signing key or to all configured RPCs;
  * the route returns 503 in that case.
+ *
+ * The call is bounded by the `livenessMs` deadline (see
+ * {@link GuardianTimeouts}); `options.signal` aborts on expiry.
  */
-export type LivenessProbe = () => Promise<Result<void, GuardianError>>;
+export type LivenessProbe = (
+  options?: AbstractionCallOptions,
+) => Promise<Result<void, GuardianError>>;
 
 /** §6.3 `X-RateLimit-*` header values to emit on a successful response. */
 export type RateLimitWindow = {
@@ -261,8 +286,14 @@ export type GuardianAbstractions = {
    * during rotation; that is invisible to this interface — both tokens
    * resolve to a TokenInfo with the same `tokenId` or different ids per
    * operator policy.
+   *
+   * The call is bounded by the `authenticateMs` deadline (see
+   * {@link GuardianTimeouts}); `options.signal` aborts on expiry.
    */
-  readonly authenticate: (token: string) => Promise<Result<TokenInfo, UnauthenticatedError>>;
+  readonly authenticate: (
+    token: string,
+    options?: AbstractionCallOptions,
+  ) => Promise<Result<TokenInfo, UnauthenticatedError>>;
 
   /**
    * EIP-712 signer. The host owns the private key (or KMS / HSM handle)
@@ -282,17 +313,48 @@ export type GuardianAbstractions = {
    *
    * Returning `Err(RateLimitedError)` yields 429 with `Retry-After` per
    * §6.3 / §6.6.
+   *
+   * The call is bounded by the `rateLimitMs` deadline (see
+   * {@link GuardianTimeouts}); `options.signal` aborts on expiry.
    */
   readonly accountRateLimit?: (
     tokenInfo: TokenInfo,
+    options?: AbstractionCallOptions,
   ) => Promise<Result<RateLimitWindow, GuardianError>>;
 
   /**
-   * Optional upstream-unavailable probe. When absent the server relies
-   * on per-endpoint signing functions to surface upstream failures via
-   * `Err(UpstreamUnavailableError)` from their on-chain reads.
+   * Optional upstream-unavailable probe, consulted at the top of every
+   * signing request (before chain-client resolution and the sign* call).
+   * Returning `Err(UpstreamUnavailableError)` short-circuits the request
+   * with the error's own 502/503 status, letting a host that has already
+   * detected its upstream is down fail fast. When absent the server
+   * relies on per-endpoint signing functions to surface upstream
+   * failures via `Err(UpstreamUnavailableError)` from their on-chain
+   * reads.
    */
   readonly probeUpstream?: () => Result<void, UpstreamUnavailableError>;
+
+  /**
+   * Optional per-call deadlines for the async abstractions above. See
+   * {@link GuardianTimeouts} for fields and defaults. On expiry the shell
+   * responds `503 upstream_unavailable` and logs at error level with the
+   * abstraction name.
+   */
+  readonly timeouts?: GuardianTimeouts;
+
+  /**
+   * Optional cap (bytes) on request bodies the shell buffers for §5.4
+   * HMAC verification and JSON parsing. Default 1 MiB. Must be a
+   * positive integer — anything else throws at construction. Bodies
+   * that declare or stream past the cap are rejected with `413`
+   * (`bad_request` envelope) before authentication — every legitimate
+   * v1 body is a small JSON document. Only the content types guardian
+   * buffers (`application/json`, `text/*`) are capped; host-composed
+   * routes accepting other media types are unaffected. Hosts deploying
+   * via `Bun.serve` SHOULD additionally set `maxRequestBodySize` as a
+   * transport-level backstop.
+   */
+  readonly maxBodyBytes?: number;
 
   // ── Validate-and-sign abstractions, declared, NOT defined ───────────────
 

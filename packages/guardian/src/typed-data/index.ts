@@ -15,7 +15,8 @@
  * Domain values (`name`, `version`) are read from each verifying
  * contract via ERC-5267 `eip712Domain()` and cached if the host
  * supplies an `Eip712DomainCache` (the defaults package's
- * `inMemoryCache<{ name; version }>` is structurally compatible).
+ * `inMemoryCache`, constructed with a `{ name, version }` schema, is
+ * structurally compatible).
  */
 
 export type { Eip712Domain, GuardianTypedData } from "./types.js";

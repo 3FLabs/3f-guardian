@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { type Address } from "viem";
+import {
+  AbiDecodingZeroDataError,
+  ContractFunctionExecutionError,
+  HttpRequestError,
+  multicall3Abi,
+  type Address,
+  type PublicClient,
+} from "viem";
 
 import {
   noopLogger,
@@ -9,13 +16,18 @@ import {
 } from "@3flabs/guardian";
 
 import { inMemoryCache } from "../src/cache/in-memory.js";
+import { AsyncCache } from "../src/cache/types.js";
+import { requestAbi } from "../src/abi/request.js";
+import { requestFactoryAbi } from "../src/abi/request-factory.js";
 import {
   buildIntentRequestBindingChecks,
+  zA1OnChainData,
   type A1OnChainData,
   type IntentRequestBindingPolicy,
 } from "../src/checks/intent-request-binding.js";
+import { scanRoleHolders } from "../src/checks/role-events.js";
 
-const FACTORY = "0xfaC70rfaC70rfaC70rfaC70rfaC70rfaC70rfaC0" as Address;
+const FACTORY = "0xfaC70ffaC70ffaC70ffaC70ffaC70ffaC70ffaC0" as Address;
 const OTHER_FACTORY = "0x0000000000000000000000000000000000000aaa" as Address;
 const RC = "0xcccccccccccccccccccccccccccccccccccccccc" as Address;
 const OWNER = "0x000000000000000000000000000000000000000a" as Address;
@@ -50,12 +62,22 @@ type Stub = {
   multicalls: Array<{ functionNames: string[] }>;
   getLogsCalls: number;
   getBlockNumberCalls: number;
+  getBlockNumberArgs: Array<{ cacheTime?: number } | undefined>;
 };
 
 /**
  * Stub `client.multicall` + `client.getLogs` + `client.getBlockNumber`
  * with a queue of multicall responses, a getLogs handler, and a fixed
- * latest-block. Throw responses simulate RPC failure.
+ * latest-block. A whole-response Error simulates a chunk-level (RPC /
+ * aggregate3) failure: under `allowFailure: true` viem does NOT throw —
+ * it returns EVERY slot as `{ status: "failure", error }` — and only
+ * throws without allowFailure. An Error ELEMENT inside a response array
+ * simulates a per-slot failure (visible only under `allowFailure:
+ * true`, mirroring viem's wrapping).
+ *
+ * `staleLatestBlock` models viem's getBlockNumber cacheTime semantics:
+ * a call WITHOUT `cacheTime: 0` is served the stale cached head, only
+ * an uncached call observes `latestBlock`.
  */
 function makeClient(args: {
   multicallResponses?: ReadonlyArray<readonly unknown[] | Error>;
@@ -64,6 +86,7 @@ function makeClient(args: {
     fromBlock?: bigint;
     toBlock?: bigint;
   }) => Array<{
+    address: Address;
     eventName: "RolesUpdated" | "RequestCreated";
     blockNumber: bigint;
     logIndex: number;
@@ -71,6 +94,7 @@ function makeClient(args: {
   }>;
   getLogsThrows?: Error;
   latestBlock?: bigint;
+  staleLatestBlock?: bigint;
   getBlockNumberThrows?: Error;
 }): Stub {
   const stub: Stub = {
@@ -78,21 +102,43 @@ function makeClient(args: {
     multicalls: [],
     getLogsCalls: 0,
     getBlockNumberCalls: 0,
+    getBlockNumberArgs: [],
   };
   let i = 0;
   const responses = args.multicallResponses ?? [];
 
   const client = {
-    multicall: async (params: { contracts: ReadonlyArray<{ functionName: string }> }) => {
+    multicall: async (params: {
+      contracts: ReadonlyArray<{ functionName: string }>;
+      allowFailure?: boolean;
+    }) => {
       stub.multicalls.push({ functionNames: params.contracts.map((c) => c.functionName) });
       const r = responses[i++];
       if (r === undefined) throw new Error(`unexpected multicall #${i}`);
+      // Mirror viem: under allowFailure a chunk-level failure is never
+      // thrown — every slot in the chunk reports the same error — and
+      // an Error element becomes a per-slot failure.
+      if (params.allowFailure === true) {
+        if (r instanceof Error) {
+          return params.contracts.map(() => ({ status: "failure", error: r }));
+        }
+        return r.map((v) =>
+          v instanceof Error ? { status: "failure", error: v } : { status: "success", result: v },
+        );
+      }
       if (r instanceof Error) throw r;
+      // Without allowFailure, viem throws the first slot's error.
+      const slotError = r.find((v) => v instanceof Error);
+      if (slotError !== undefined) throw slotError;
       return r;
     },
-    getBlockNumber: async () => {
+    getBlockNumber: async (params?: { cacheTime?: number }) => {
       stub.getBlockNumberCalls++;
+      stub.getBlockNumberArgs.push(params);
       if (args.getBlockNumberThrows) throw args.getBlockNumberThrows;
+      if (args.staleLatestBlock !== undefined && params?.cacheTime !== 0) {
+        return args.staleLatestBlock;
+      }
       return args.latestBlock ?? 100_000n;
     },
     getLogs: async (params: {
@@ -109,7 +155,11 @@ function makeClient(args: {
   return stub;
 }
 
-function ctx(client: SigningContext["client"], now = new Date(1_700_000_000_000)): SigningContext {
+function ctx(
+  client: SigningContext["client"],
+  now = new Date(1_700_000_000_000),
+  signal?: AbortSignal,
+): SigningContext {
   return {
     chainId: 1,
     client,
@@ -120,6 +170,7 @@ function ctx(client: SigningContext["client"], now = new Date(1_700_000_000_000)
       throw new Error("unreachable");
     }) as never,
     logger: noopLogger,
+    ...(signal !== undefined ? { signal } : {}),
   };
 }
 
@@ -134,18 +185,21 @@ describe("buildIntentRequestBindingChecks", () => {
         if (fromBlock !== undefined && fromBlock <= 5_000n && toBlock! >= 5_000n) {
           return [
             {
+              address: FACTORY,
               eventName: "RequestCreated",
               blockNumber: 5_000n,
               logIndex: 0,
               args: { request: RC },
             },
             {
+              address: RC,
               eventName: "RolesUpdated",
               blockNumber: 5_000n,
               logIndex: 1,
               args: { user: PULLER, roles: ROLE_PULLER },
             },
             {
+              address: RC,
               eventName: "RolesUpdated",
               blockNumber: 5_000n,
               logIndex: 2,
@@ -188,14 +242,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[ROGUE_OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -221,8 +283,15 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
@@ -230,12 +299,14 @@ describe("buildIntentRequestBindingChecks", () => {
         },
         {
           // Rogue grant: a non-accepted address gets the puller role later.
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_100n,
           logIndex: 0,
           args: { user: ROGUE, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -275,31 +346,334 @@ describe("buildIntentRequestBindingChecks", () => {
     }
   });
 
+  it("fails when a rogue grant is observed within the lookback window even though the contract is older than the lookback", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      // Deployment is older than (latest - maxLookback) → tooOld. But a
+      // rogue puller grant DID land inside the scanned window — partial
+      // data must fail the check, never silently skip.
+      latestBlock: 10_000n,
+      getLogs: ({ fromBlock, toBlock }) =>
+        fromBlock! <= 9_900n && toBlock! >= 9_900n
+          ? [
+              {
+                address: RC,
+                eventName: "RolesUpdated" as const,
+                blockNumber: 9_900n,
+                logIndex: 0,
+                args: { user: ROGUE, roles: ROLE_PULLER },
+              },
+            ]
+          : [],
+    });
+    const run = buildIntentRequestBindingChecks({ policy });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const checks = (r.error as ValidationFailedError).checks;
+      const puller = checks.find((c) => c.description.includes("puller role"));
+      expect(puller?.passed).toBe(false);
+      expect(puller?.reason).toMatch(/rogue role-holder\(s\) observed within the lookback window/);
+      expect(puller?.reason).toContain(ROGUE);
+      // No rogue consumer was observed — that check stays skipped.
+      const consumer = checks.find((c) => c.description.includes("consumer role"));
+      expect(consumer?.skipped).toBe(true);
+    }
+  });
+
+  it("keeps role checks skipped on tooOld when only ACCEPTED holders are observed in-window (partial data never passes)", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 10_000n,
+      getLogs: ({ fromBlock, toBlock }) =>
+        fromBlock! <= 9_900n && toBlock! >= 9_900n
+          ? [
+              {
+                address: RC,
+                eventName: "RolesUpdated" as const,
+                blockNumber: 9_900n,
+                logIndex: 0,
+                args: { user: PULLER, roles: ROLE_PULLER },
+              },
+            ]
+          : [],
+    });
+    const run = buildIntentRequestBindingChecks({ policy });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isOk()).toBe(true);
+    if (r.isOk()) {
+      const puller = r.value.find((c) => c.description.includes("puller role"));
+      // Skipped, NOT passed — the window may have missed earlier grants.
+      expect(puller?.skipped).toBe(true);
+    }
+  });
+
+  it("onLookbackExhausted='fail' fails closed when the contract is older than the lookback", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 10_000n,
+      getLogs: () => [],
+    });
+    const run = buildIntentRequestBindingChecks({
+      policy: { ...policy, onLookbackExhausted: "fail" },
+    });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const checks = (r.error as ValidationFailedError).checks;
+      const puller = checks.find((c) => c.description.includes("puller role"));
+      const consumer = checks.find((c) => c.description.includes("consumer role"));
+      expect(puller?.passed).toBe(false);
+      expect(puller?.reason).toMatch(/onLookbackExhausted=fail/);
+      expect(consumer?.passed).toBe(false);
+    }
+  });
+
+  it("replays a stale cached tooOld entry without partialHolders as skipped (legacy cache shape)", async () => {
+    const stub = makeClient({}); // any on-chain read would throw "unexpected multicall"
+    const cache = inMemoryCache(zA1OnChainData);
+    // Entry written by an older package version — no partialHolders.
+    await cache.set(`1:${RC.toLowerCase()}`, { kind: "tooOld", factory: FACTORY, owner: OWNER });
+    const run = buildIntentRequestBindingChecks({ policy, cache });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isOk()).toBe(true);
+    if (r.isOk()) {
+      const puller = r.value.find((c) => c.description.includes("puller role"));
+      expect(puller?.skipped).toBe(true);
+    }
+    expect(stub.multicalls.length).toBe(0);
+  });
+
+  it("treats a deterministic owner() decode failure (EOA request contract) as a cached noFactory 422, not a 503", async () => {
+    const eoaError = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: requestAbi,
+      functionName: "owner",
+      contractAddress: RC,
+    });
+    // Per-slot failure of owner() (the factory slot answers normally).
+    const stub = makeClient({ multicallResponses: [[eoaError, false]] });
+    const cache = inMemoryCache(zA1OnChainData);
+    const run = buildIntentRequestBindingChecks({ policy, cache });
+
+    const r1 = await run(ctx(stub.client), baseBody);
+    expect(r1.isErr()).toBe(true);
+    if (r1.isErr()) {
+      expect(r1.error).toBeInstanceOf(ValidationFailedError);
+      const factory = (r1.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("deployed by"),
+      );
+      expect(factory?.passed).toBe(false);
+    }
+    expect(stub.multicalls.length).toBe(1);
+
+    // The noFactory classification is cached — no repeat RPC.
+    const r2 = await run(ctx(stub.client), baseBody);
+    expect(r2.isErr()).toBe(true);
+    expect(stub.multicalls.length).toBe(1);
+  });
+
+  it("treats a deterministic isRequest() failure on a misconfigured factory as a non-match, so a healthy factory still recognises the contract", async () => {
+    const badFactoryError = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: requestFactoryAbi,
+      functionName: "isRequest",
+      args: [RC],
+      contractAddress: OTHER_FACTORY,
+    });
+    const policyMulti: IntentRequestBindingPolicy = {
+      ...policy,
+      acceptedRequestFactories: new Map([[1, new Set<string>([OTHER_FACTORY, FACTORY])]]),
+    };
+    const stub = makeClient({
+      // First factory slot (OTHER_FACTORY, an EOA) fails per-slot; the
+      // healthy second factory answers true.
+      multicallResponses: [[OWNER, badFactoryError, true]],
+      latestBlock: 5_500n,
+      getLogs: () => [
+        {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 1,
+          args: { user: PULLER, roles: ROLE_PULLER },
+        },
+        {
+          address: RC,
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 2,
+          args: { user: CONSUMER, roles: ROLE_CONSUMER },
+        },
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({ policy: policyMulti });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isOk()).toBe(true);
+  });
+
+  it("fails 503 — never a cached noFactory 422 — when a factory slot fails deterministically and no other factory matches", async () => {
+    const badFactoryError = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: requestFactoryAbi,
+      functionName: "isRequest",
+      args: [RC],
+      contractAddress: FACTORY,
+    });
+    const stub = makeClient({
+      multicallResponses: [
+        [OWNER, badFactoryError],
+        [OWNER, badFactoryError],
+      ],
+    });
+    const cache = inMemoryCache(zA1OnChainData);
+    const run = buildIntentRequestBindingChecks({ policy, cache });
+
+    const r1 = await run(ctx(stub.client), baseBody);
+    expect(r1.isErr()).toBe(true);
+    if (r1.isErr()) {
+      // Operator config error, not client error: 503, not a 422 check.
+      expect(r1.error).toBeInstanceOf(UpstreamUnavailableError);
+    }
+
+    // NOT cached — a second call re-issues the multicall instead of
+    // amortising the wrong noFactory answer.
+    const r2 = await run(ctx(stub.client), baseBody);
+    expect(r2.isErr()).toBe(true);
+    expect(stub.multicalls.length).toBe(2);
+  });
+
+  it("fetches the scan upper bound uncached (cacheTime: 0) so a stale cached head cannot hide fresh deployments or grants", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      // viem-style cacheTime semantics: a plain getBlockNumber() serves
+      // a cached head that predates the deployment + grant txs (mined
+      // at block 5_000); only `cacheTime: 0` observes the true head.
+      staleLatestBlock: 4_999n,
+      latestBlock: 5_500n,
+      getLogs: ({ fromBlock, toBlock }) =>
+        fromBlock! <= 5_000n && toBlock! >= 5_000n
+          ? [
+              {
+                address: FACTORY,
+                eventName: "RequestCreated" as const,
+                blockNumber: 5_000n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+              {
+                address: RC,
+                eventName: "RolesUpdated" as const,
+                blockNumber: 5_000n,
+                logIndex: 1,
+                args: { user: PULLER, roles: ROLE_PULLER },
+              },
+              {
+                address: RC,
+                eventName: "RolesUpdated" as const,
+                blockNumber: 5_000n,
+                logIndex: 2,
+                args: { user: CONSUMER, roles: ROLE_CONSUMER },
+              },
+            ]
+          : [],
+    });
+    const run = buildIntentRequestBindingChecks({ policy });
+    const r = await run(ctx(stub.client), baseBody);
+    // A stale upper bound would walk [0, 4_999], miss every event, and
+    // fail-closed with "no live role-holder found".
+    expect(r.isOk()).toBe(true);
+    expect(stub.getBlockNumberArgs).toEqual([{ cacheTime: 0 }]);
+  });
+
+  it("ctx.signal abort surfaces as UpstreamUnavailableError instead of scanning to lookback exhaustion", async () => {
+    const controller = new AbortController();
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 100_000n,
+      // Abort during the first chunk — the scan must stop at the next
+      // chunk boundary instead of walking the full lookback window.
+      getLogs: () => {
+        controller.abort();
+        return [];
+      },
+    });
+    const run = buildIntentRequestBindingChecks({ policy });
+    const r = await run(ctx(stub.client, undefined, controller.signal), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
+    expect(stub.getLogsCalls).toBe(1);
+  });
+
+  it("keeps 503 — never cached — for a chunk-level multicall failure (aggregate3 HttpRequestError)", async () => {
+    // Under allowFailure: true a transport failure is not thrown by
+    // viem: every slot reports the same ContractFunctionExecutionError
+    // with functionName "aggregate3" (the multicall's own call).
+    const transportError = new ContractFunctionExecutionError(
+      new HttpRequestError({ url: "http://localhost:8545" }),
+      { abi: multicall3Abi, functionName: "aggregate3", args: [[]] },
+    );
+    const stub = makeClient({ multicallResponses: [transportError, transportError] });
+    const cache = inMemoryCache(zA1OnChainData);
+    const run = buildIntentRequestBindingChecks({ policy, cache });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
+      // The client-facing envelope must not leak upstream error details.
+      const message = (r.error as UpstreamUnavailableError).message;
+      expect(message).toBe("request-contract read failed upstream");
+      expect(message).not.toContain("localhost:8545");
+    }
+
+    // NOT cached — a second call re-issues the multicall instead of
+    // amortising a transient transport failure.
+    const r2 = await run(ctx(stub.client), baseBody);
+    expect(r2.isErr()).toBe(true);
+    expect(stub.multicalls.length).toBe(2);
+  });
+
   it("revoking a role (RolesUpdated with roles=0) prunes the holder", async () => {
     const stub = makeClient({
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: ROGUE, roles: ROLE_PULLER }, // initial rogue grant
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_100n,
           logIndex: 0,
           args: { user: ROGUE, roles: 0n }, // revoked
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 3,
@@ -337,14 +711,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -369,14 +751,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, false, true]], // first factory says no, second says yes
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -394,14 +784,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -409,7 +807,7 @@ describe("buildIntentRequestBindingChecks", () => {
         },
       ],
     });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
     const run = buildIntentRequestBindingChecks({ policy, cache });
 
     const r1 = await run(ctx(stub.client), baseBody);
@@ -431,14 +829,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -446,7 +852,7 @@ describe("buildIntentRequestBindingChecks", () => {
         },
       ],
     });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
 
     // First call with permissive policy — cache fills.
     const r1 = await buildIntentRequestBindingChecks({ policy, cache })(ctx(stub.client), baseBody);
@@ -481,14 +887,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -496,7 +910,7 @@ describe("buildIntentRequestBindingChecks", () => {
         },
       ],
     });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
 
     const r1 = await buildIntentRequestBindingChecks({ policy, cache })(ctx(stub.client), baseBody);
     expect(r1.isOk()).toBe(true);
@@ -534,14 +948,22 @@ describe("buildIntentRequestBindingChecks", () => {
       ],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -550,7 +972,7 @@ describe("buildIntentRequestBindingChecks", () => {
       ],
     });
     let now = 1_700_000_000_000;
-    const cache = inMemoryCache<A1OnChainData>({ now: () => now });
+    const cache = inMemoryCache(zA1OnChainData, { now: () => now });
     const run = buildIntentRequestBindingChecks({ policy, cache, cacheTtlMs: 1_000 });
 
     const r1 = await run(ctx(stub.client, new Date(now)), baseBody);
@@ -569,7 +991,7 @@ describe("buildIntentRequestBindingChecks", () => {
     const stub = makeClient({
       multicallResponses: [[OWNER, false]],
     });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
     const run = buildIntentRequestBindingChecks({ policy, cache });
 
     const r1 = await run(ctx(stub.client), baseBody);
@@ -586,14 +1008,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -601,18 +1031,366 @@ describe("buildIntentRequestBindingChecks", () => {
         },
       ],
     });
-    const cache: import("../src/cache/types.js").AsyncCache<A1OnChainData> = {
-      async get() {
+    class ThrowingCache extends AsyncCache<A1OnChainData> {
+      constructor() {
+        super(zA1OnChainData);
+      }
+      protected override async rawGet(): Promise<unknown> {
         throw new Error("cache transport down");
-      },
-      async set() {
+      }
+      override async set(): Promise<void> {
         // swallow
-      },
-      async delete() {},
-    };
+      }
+      override async delete(): Promise<void> {}
+    }
+    const cache = new ThrowingCache();
     const run = buildIntentRequestBindingChecks({ policy, cache });
     const r = await run(ctx(stub.client), baseBody);
     expect(r.isOk()).toBe(true);
     expect(stub.multicalls.length).toBe(1);
+  });
+
+  it("resolves when two accepted factories both claim the contract and the SECOND emitted the deployment", async () => {
+    // Factory-migration scenario: old + new factory are both accepted
+    // and both answer isRequest=true (e.g. the new factory's registry
+    // proxies the old one). The deployment event lives on the second
+    // hit — scanning only factoryHits[0] would miss it, silently
+    // degrade to tooOld (role checks skipped under the default
+    // disposition), and cache the wrong outcome.
+    const twoFactoryPolicy: IntentRequestBindingPolicy = {
+      ...policy,
+      acceptedRequestFactories: new Map([[1, new Set<string>([FACTORY, OTHER_FACTORY])]]),
+    };
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true, true]], // owner + both isRequest=true
+      latestBlock: 5_500n,
+      getLogs: ({ fromBlock, toBlock }) =>
+        fromBlock !== undefined && fromBlock <= 5_000n && toBlock! >= 5_000n
+          ? [
+              {
+                address: OTHER_FACTORY,
+                eventName: "RequestCreated",
+                blockNumber: 5_000n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 1,
+                args: { user: PULLER, roles: ROLE_PULLER },
+              },
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 2,
+                args: { user: CONSUMER, roles: ROLE_CONSUMER },
+              },
+            ]
+          : [],
+    });
+    const cache = inMemoryCache(zA1OnChainData);
+    const run = buildIntentRequestBindingChecks({ policy: twoFactoryPolicy, cache });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isOk()).toBe(true);
+    if (r.isOk()) {
+      // Fully resolved: every role check evaluated, nothing skipped.
+      expect(r.value.every((c) => c.skipped !== true)).toBe(true);
+    }
+    // The cached entry is attributed to the factory that actually
+    // emitted the deployment event, not blindly to the first hit.
+    const entry = await cache.get(`1:${RC.toLowerCase()}`);
+    expect(entry?.kind).toBe("resolved");
+    if (entry?.kind === "resolved") expect(entry.factory).toBe(OTHER_FACTORY);
+  });
+});
+
+describe("scanRoleHolders", () => {
+  function recordingClient(args: { onGetLogs?: () => void } = {}): {
+    client: PublicClient;
+    spans: Array<{ fromBlock: bigint; toBlock: bigint }>;
+  } {
+    const spans: Array<{ fromBlock: bigint; toBlock: bigint }> = [];
+    const client = {
+      getLogs: async (params: { fromBlock: bigint; toBlock: bigint }) => {
+        spans.push({ fromBlock: params.fromBlock, toBlock: params.toBlock });
+        args.onGetLogs?.();
+        return [];
+      },
+    } as unknown as PublicClient;
+    return { client, spans };
+  }
+
+  it("never issues a chunk wider than blockRange, including the final one (off-by-one regression)", async () => {
+    // maxLookback an exact multiple of blockRange — the configuration
+    // that used to produce a terminal blockRange+1 chunk.
+    const { client, spans } = recordingClient();
+    const outcome = await scanRoleHolders({
+      client,
+      factories: [FACTORY],
+      requestContract: RC,
+      latestBlock: 10_000n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    expect(outcome.kind).toBe("tooOld");
+    expect(spans.length).toBeGreaterThan(0);
+    for (const { fromBlock, toBlock } of spans) {
+      expect(toBlock - fromBlock + 1n <= 1_000n, `chunk [${fromBlock}, ${toBlock}]`).toBe(true);
+    }
+    // Contiguous, gapless coverage of [earliestAllowed, latestBlock].
+    expect(spans[0]?.toBlock).toBe(10_000n);
+    expect(spans[spans.length - 1]?.fromBlock).toBe(5_000n);
+    for (let i = 1; i < spans.length; i++) {
+      expect(spans[i]!.toBlock).toBe(spans[i - 1]!.fromBlock - 1n);
+    }
+  });
+
+  it("returns the in-window partial holder state on tooOld", async () => {
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        fromBlock <= 9_900n && toBlock >= 9_900n
+          ? [
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 9_900n,
+                logIndex: 0,
+                args: { user: ROGUE, roles: ROLE_PULLER },
+              },
+            ]
+          : [],
+    } as unknown as PublicClient;
+    const outcome = await scanRoleHolders({
+      client,
+      factories: [FACTORY],
+      requestContract: RC,
+      latestBlock: 10_000n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    expect(outcome.kind).toBe("tooOld");
+    if (outcome.kind === "tooOld") {
+      expect(outcome.partialHolders.get(ROGUE)).toBe(ROLE_PULLER);
+    }
+  });
+
+  it("ignores RolesUpdated emitted by the factory (wrong-emitter regression)", async () => {
+    // The wire filter is address ∈ {factory, requestContract} × both
+    // topics, so a factory-level RolesUpdated (factories are solady
+    // OwnableRoles contracts too) arrives in the same batch. Replaying
+    // it into the request contract's holder map would let a factory
+    // grant with an overlapping role bit mask an empty holder set.
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        fromBlock <= 5_000n && toBlock >= 5_000n
+          ? [
+              {
+                address: FACTORY,
+                eventName: "RequestCreated",
+                blockNumber: 5_000n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+              {
+                address: FACTORY,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 1,
+                args: { user: ROGUE, roles: ROLE_PULLER },
+              },
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 2,
+                args: { user: PULLER, roles: ROLE_PULLER },
+              },
+            ]
+          : [],
+    } as unknown as PublicClient;
+    const outcome = await scanRoleHolders({
+      client,
+      factories: [FACTORY],
+      requestContract: RC,
+      latestBlock: 5_500n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    expect(outcome.kind).toBe("resolved");
+    if (outcome.kind === "resolved") {
+      expect(outcome.holders.has(ROGUE)).toBe(false);
+      expect(outcome.holders.get(PULLER.toLowerCase() as Address)).toBe(ROLE_PULLER);
+    }
+  });
+
+  it("ignores a RequestCreated not emitted by the scanned factory", async () => {
+    // A foreign contract naming this request contract in a
+    // RequestCreated-shaped event must not count as the deployment
+    // marker — only THIS factory's event proves the scan reached the
+    // contract's origin.
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        fromBlock <= 9_900n && toBlock >= 9_900n
+          ? [
+              {
+                address: OTHER_FACTORY,
+                eventName: "RequestCreated",
+                blockNumber: 9_900n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+            ]
+          : [],
+    } as unknown as PublicClient;
+    const outcome = await scanRoleHolders({
+      client,
+      factories: [FACTORY],
+      requestContract: RC,
+      latestBlock: 10_000n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    // Deployment never confirmed — the scan must exhaust the lookback
+    // and report tooOld, not a trusted-complete "resolved".
+    expect(outcome.kind).toBe("tooOld");
+  });
+
+  it("accepts the deployment event from any of the matched factories", async () => {
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        fromBlock <= 5_000n && toBlock >= 5_000n
+          ? [
+              {
+                address: OTHER_FACTORY,
+                eventName: "RequestCreated",
+                blockNumber: 5_000n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+            ]
+          : [],
+    } as unknown as PublicClient;
+    const outcome = await scanRoleHolders({
+      client,
+      factories: [FACTORY, OTHER_FACTORY],
+      requestContract: RC,
+      latestBlock: 5_500n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    expect(outcome.kind).toBe("resolved");
+    if (outcome.kind === "resolved") {
+      expect(outcome.deploymentBlock).toBe(5_000n);
+      expect(outcome.deploymentFactory).toBe(OTHER_FACTORY);
+    }
+  });
+
+  it("replays same-block events in logIndex order (grant then revoke in one block)", async () => {
+    // The stub returns the logs in REVERSE order; only (block, logIndex)
+    // sorting — not array order — makes the revoke win.
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        fromBlock <= 5_000n && toBlock >= 5_000n
+          ? [
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 2,
+                args: { user: PULLER, roles: 0n }, // revoke (post-update bitfield)
+              },
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 1,
+                args: { user: PULLER, roles: ROLE_PULLER }, // grant
+              },
+              {
+                address: FACTORY,
+                eventName: "RequestCreated",
+                blockNumber: 5_000n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+            ]
+          : [],
+    } as unknown as PublicClient;
+    const outcome = await scanRoleHolders({
+      client,
+      factories: [FACTORY],
+      requestContract: RC,
+      latestBlock: 5_500n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    expect(outcome.kind).toBe("resolved");
+    if (outcome.kind === "resolved") {
+      // Grant at logIndex 1, revoke at logIndex 2 — final state empty.
+      expect(outcome.holders.size).toBe(0);
+    }
+  });
+
+  it("throws once the wall-clock budget is exhausted between chunks", async () => {
+    let clock = 0;
+    const { client } = recordingClient({
+      onGetLogs: () => {
+        clock += 10;
+      },
+    });
+    await expect(
+      scanRoleHolders({
+        client,
+        factories: [FACTORY],
+        requestContract: RC,
+        latestBlock: 10_000n,
+        blockRange: 1_000n,
+        maxLookbackBlocks: 5_000n,
+        deadlineMs: 15,
+        now: () => clock,
+      }),
+    ).rejects.toThrow(/exceeded its 15ms budget/);
+  });
+
+  it("stops at the next chunk boundary when the request signal aborts", async () => {
+    const controller = new AbortController();
+    const { client, spans } = recordingClient({ onGetLogs: () => controller.abort() });
+    await expect(
+      scanRoleHolders({
+        client,
+        factories: [FACTORY],
+        requestContract: RC,
+        latestBlock: 10_000n,
+        blockRange: 1_000n,
+        maxLookbackBlocks: 5_000n,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow(/aborted by the request signal/);
+    // Aborted after chunk 1 — no further getLogs round-trips.
+    expect(spans.length).toBe(1);
+  });
+
+  it("eventScanDeadlineMs surfaces as UpstreamUnavailableError through the runner", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 10_000n,
+      getLogs: () => [],
+    });
+    // Wrap the stub's getLogs with a real delay so Date.now() advances
+    // past the 1ms budget after the first chunk.
+    const inner = stub.client.getLogs.bind(stub.client);
+    (stub.client as { getLogs: typeof inner }).getLogs = async (params) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return inner(params);
+    };
+    const run = buildIntentRequestBindingChecks({
+      policy: { ...policy, eventScanDeadlineMs: 1 },
+    });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
   });
 });

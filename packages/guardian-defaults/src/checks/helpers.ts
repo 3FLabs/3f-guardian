@@ -1,3 +1,10 @@
+import {
+  AbiDecodingZeroDataError,
+  ContractFunctionExecutionError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+} from "viem";
+
 import { type CheckEntry, failed, passed, skipped, ValidationFailedError } from "@3flabs/guardian";
 
 /**
@@ -28,6 +35,65 @@ export function rollUp(
 export { passed, skipped, failed };
 
 /**
+ * Classifies an error thrown by a viem `multicall({ allowFailure:
+ * false })` (or `readContract`): returns `true` iff one of the named
+ * functions failed DETERMINISTICALLY — the call reverted or returned no
+ * data (the target is an EOA or an unrelated contract). Such failures
+ * are a property of the inputs, not of the upstream's health, so the
+ * caller should map them to a 422-class check failure instead of a 503.
+ *
+ * Transport-level failures never match: an RPC outage / timeout
+ * surfaces as a `ContractFunctionExecutionError` for the multicall's
+ * own `aggregate3` call (or as a bare `HttpRequestError`), whose
+ * `functionName` is not in `functionNames` and whose cause chain
+ * carries no revert / zero-data marker.
+ */
+export function isDeterministicContractCallFailure(
+  e: unknown,
+  functionNames: readonly string[],
+): boolean {
+  if (!(e instanceof ContractFunctionExecutionError)) return false;
+  if (!functionNames.includes(e.functionName)) return false;
+  return (
+    e.walk(
+      (cause) =>
+        cause instanceof AbiDecodingZeroDataError ||
+        cause instanceof ContractFunctionZeroDataError ||
+        cause instanceof ContractFunctionRevertedError,
+    ) !== null
+  );
+}
+
+/**
+ * Classifies a failed `multicall({ allowFailure: true })` slot as a
+ * CHUNK-level failure: the aggregate3 call itself failed (transport
+ * outage, timeout, or the multicall contract reverting), so every slot
+ * in the chunk carries the same error. viem wraps slot-local
+ * decode/revert failures with the slot's own `functionName` (`owner`,
+ * `isRequest`, …) via `getContractError`, and chunk-level failures with
+ * `functionName: "aggregate3"`, so keying on the name is exact. Use it
+ * to route logging: a chunk failure is upstream health, never an
+ * operator-configuration or client-input problem.
+ */
+export function isMulticallChunkFailure(e: unknown): boolean {
+  return e instanceof ContractFunctionExecutionError && e.functionName === "aggregate3";
+}
+
+/**
+ * Normalise an unknown thrown value into a log-safe message with
+ * absolute URLs redacted. viem's transport errors (`HttpRequestError`
+ * and everything that wraps it) embed the RPC URL in their message,
+ * and hosted-provider URLs routinely carry the API key in the path or
+ * query (`https://mainnet.example.com/v2/<key>`). These messages are
+ * only ever logged server-side, but log pipelines are shipped and
+ * retained broadly enough that provider keys don't belong in them.
+ */
+export function sanitizeErr(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  return msg.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"')\]]+/gi, "[redacted-url]");
+}
+
+/**
  * §A.* set-membership predicate. Compares case-insensitively for
  * EVM addresses and case-sensitively for everything else.
  *
@@ -54,6 +120,14 @@ export function checkMembership(args: {
 }
 
 /**
+ * Default description emitted by {@link checkDeadline}. Exported so
+ * composing runners (the §A.4 batch) can identify — and dedup — a
+ * nested runner's deadline entry by exact match instead of a fragile
+ * prefix test.
+ */
+export const DEADLINE_CHECK_DESCRIPTION = "deadline within MAX_DEADLINE_SECONDS_AHEAD of now";
+
+/**
  * §A.* deadline check (§7.7).
  *
  * Returns failed iff `deadline > now + maxSecondsAhead`. The spec only
@@ -68,7 +142,7 @@ export function checkDeadline(args: {
   maxSecondsAhead: number;
 }): CheckEntry {
   const {
-    description = "deadline within MAX_DEADLINE_SECONDS_AHEAD of now",
+    description = DEADLINE_CHECK_DESCRIPTION,
     nowUnixSeconds,
     deadline,
     maxSecondsAhead,
@@ -113,6 +187,11 @@ export function checkSwapPriceTolerance(args: {
     referencePriceWad,
     toleranceBps,
   } = args;
+  if (!Number.isInteger(toleranceBps) || toleranceBps < 0) {
+    // BigInt() below would throw on a fractional bps, violating the
+    // never-throw contract of check evaluation — fail closed instead.
+    return failed(description, `toleranceBps must be a non-negative integer, got ${toleranceBps}`);
+  }
   if (amountB === 0n) {
     return failed(description, "leg-B amount is zero; price ratio undefined");
   }
@@ -123,13 +202,26 @@ export function checkSwapPriceTolerance(args: {
   const observed = (amountA * WAD) / amountB;
   const delta =
     observed > referencePriceWad ? observed - referencePriceWad : referencePriceWad - observed;
-  const tolerance = (referencePriceWad * BigInt(toleranceBps)) / 10_000n;
+  const tolerance = bpsToleranceWithWeiFloor(referencePriceWad, BigInt(toleranceBps));
   if (delta <= tolerance) return passed(description);
   return failed(
     description,
     `observed ratio ${observed} deviates from reference ${referencePriceWad} ` +
       `by ${delta} (tolerance=${tolerance}, bps=${toleranceBps})`,
   );
+}
+
+/**
+ * Absolute tolerance for a bps-of-expected comparison, floored at 1 wei
+ * for any non-zero bps: the proportional math floors to zero whenever
+ * `expected * bps < 10_000`, which would deny small values the
+ * documented ~1 wei mulDiv rounding slack. Shared by
+ * {@link checkSwapPriceTolerance} and the §A.3 runner so the two
+ * security-relevant fixed-point paths cannot diverge.
+ */
+export function bpsToleranceWithWeiFloor(expected: bigint, toleranceBps: bigint): bigint {
+  const proportional = (expected * toleranceBps) / 10_000n;
+  return proportional > 0n ? proportional : toleranceBps > 0n ? 1n : 0n;
 }
 
 /**

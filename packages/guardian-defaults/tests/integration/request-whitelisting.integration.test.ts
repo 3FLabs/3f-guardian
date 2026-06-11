@@ -73,6 +73,32 @@ describe("§A.4 request-whitelisting — on-chain", () => {
     expect(res.isOk(), res.isErr() ? JSON.stringify(res.error) : "").toBe(true);
   });
 
+  it("classifies an EOA whitelistBook as a 422 check failure, not a 503", async () => {
+    const { book, clients } = fixture.snapshot();
+    const ctx = makeSigningContext({ client: clients.publicClient, chainId: book.chainId });
+    const run = buildRequestWhitelistingChecks({
+      policy: policyFor(book),
+      guardianSigner: book.accounts.validator1.address,
+    });
+
+    const res = await run(ctx, {
+      chainId: book.chainId,
+      whitelistBook: book.accounts.owner.address, // an EOA, not a book
+      operation: "unwhitelist",
+      requestContracts: [book.request],
+      nonce: "0",
+      deadline: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    expect(res.isErr()).toBe(true);
+    if (!res.isErr()) return;
+    expect(res.error).toBeInstanceOf(ValidationFailedError);
+    const bookCheck = (res.error as ValidationFailedError).checks.find((c) =>
+      c.description.includes("per-validator nonce state"),
+    );
+    expect(bookCheck?.passed).toBe(false);
+  });
+
   it("fails when the request-side nonce window is exceeded (nonce > floor + maxNonceAboveFloor)", async () => {
     const { book, clients } = fixture.snapshot();
     const ctx = makeSigningContext({ client: clients.publicClient, chainId: book.chainId });

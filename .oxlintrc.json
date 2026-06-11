@@ -9,9 +9,27 @@
     "no-unused-vars": ["error", { "argsIgnorePattern": "^_" }],
     "typescript/no-explicit-any": "warn",
     "no-underscore-dangle": [
-      "off",
-      { "allow": ["_tag", "__rawBodyByRequest"] }
-    ]
+      "error",
+      { "allow": ["_tag", "__rawBodyByRequest", "totalAssets_", "totalSupply_"] }
+    ],
+    // Sequential awaits are deliberate throughout this repo: request-body
+    // stream reads (src), fake-timer ticks and ordered assertions (tests),
+    // and fail-fast CLI logging (scripts). `Promise.all` is the wrong fix
+    // in all of those, so the rule is pure noise here.
+    "no-await-in-loop": "off",
+    // Its suggested fix (`Array#toSorted`) needs the ES2023 lib, but the
+    // packages compile against ES2022 — the rule would demand code that
+    // fails typecheck.
+    "unicorn/no-array-sort": "off"
   },
+  "overrides": [
+    {
+      // Tests idiomatically define helpers inside describe/it scopes.
+      "files": ["packages/*/tests/**"],
+      "rules": {
+        "unicorn/consistent-function-scoping": "off"
+      }
+    }
+  ],
   "ignorePatterns": ["node_modules", "dist", "bun.lock"]
 }

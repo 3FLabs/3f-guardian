@@ -25,12 +25,14 @@ export function privateKeyToSignTypedData(privateKey: Hex): SignTypedData {
   return async (parameters) =>
     Result.tryPromise({
       try: () => signTypedData({ privateKey, ...parameters }),
-      catch: (cause) =>
-        new InternalError({
-          message:
-            cause instanceof Error
-              ? `Local signTypedData failed: ${cause.message}`
-              : "Local signTypedData failed",
-        }),
+      // Keep the envelope message generic — viem error text can embed
+      // request/transport detail and this message reaches the client
+      // 500 body. The thrown value is preserved as `cause` for hosts
+      // that log tagged errors with their causes.
+      catch: (cause) => {
+        const error = new InternalError({ message: "Local signTypedData failed" });
+        error.cause = cause;
+        return error;
+      },
     });
 }

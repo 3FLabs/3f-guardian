@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { Address, PublicClient } from "viem";
+import {
+  BaseError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+  HttpRequestError,
+  InternalRpcError,
+  RpcRequestError,
+  type Address,
+  type PublicClient,
+} from "viem";
+import { getContractError } from "viem/utils";
 
 import {
   eip712DomainCacheKey,
@@ -69,7 +79,129 @@ describe("fetchEip712DomainNameVersion", () => {
     expect(r.isErr()).toBe(true);
     if (r.isErr()) {
       expect(r.error._tag).toBe("UpstreamUnavailable");
-      expect(r.error.status).toBe(503);
+      if (r.error._tag === "UpstreamUnavailable") expect(r.error.status).toBe(503);
+    }
+  });
+
+  it("returns UpstreamUnavailableError on transport failure wrapped in a viem cause chain", async () => {
+    const client = makeClient({
+      read: () => {
+        throw new BaseError("call failed", {
+          cause: new HttpRequestError({ url: "http://rpc.internal:8545", details: "ECONNREFUSED" }),
+        });
+      },
+    });
+    const r = await fetchEip712DomainNameVersion({
+      client,
+      chainId: 1,
+      verifyingContract: CONTRACT,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error._tag).toBe("UpstreamUnavailable");
+      // The client-facing message must not leak the raw viem error text
+      // (it can embed RPC URLs).
+      expect(r.error.message).not.toContain("rpc.internal");
+      expect(r.error.message).not.toContain("ECONNREFUSED");
+    }
+  });
+
+  it("returns NotFoundError (404) when the contract returns zero data (no code / no ERC-5267)", async () => {
+    const client = makeClient({
+      read: () => {
+        throw new BaseError("call failed", {
+          cause: new ContractFunctionZeroDataError({ functionName: "eip712Domain" }),
+        });
+      },
+    });
+    const r = await fetchEip712DomainNameVersion({
+      client,
+      chainId: 1,
+      verifyingContract: CONTRACT,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error._tag).toBe("NotFound");
+      expect(r.error.message).toContain(CONTRACT);
+      expect(r.error.message).toContain("ERC-5267");
+    }
+  });
+
+  it("returns NotFoundError (404) when eip712Domain() reverts with revert data", async () => {
+    const client = makeClient({
+      read: () => {
+        throw new BaseError("call failed", {
+          cause: new ContractFunctionRevertedError({
+            abi: [],
+            // Raw revert payload (custom-error selector) — unambiguous
+            // evidence of a genuine on-chain revert.
+            data: "0x12345678",
+            functionName: "eip712Domain",
+          }),
+        });
+      },
+    });
+    const r = await fetchEip712DomainNameVersion({
+      client,
+      chainId: 1,
+      verifyingContract: CONTRACT,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error._tag).toBe("NotFound");
+  });
+
+  it("returns NotFoundError (404) on a data-less revert whose cause carries JSON-RPC code 3", async () => {
+    const client = makeClient({
+      read: () => {
+        throw new BaseError("call failed", {
+          cause: new ContractFunctionRevertedError({
+            abi: [],
+            functionName: "eip712Domain",
+            message: "execution reverted",
+            // Code 3 is the unambiguous execution-reverted JSON-RPC
+            // code, even when the node returns no revert data.
+            cause: Object.assign(new Error("execution reverted"), { code: 3 }),
+          }),
+        });
+      },
+    });
+    const r = await fetchEip712DomainNameVersion({
+      client,
+      chainId: 1,
+      verifyingContract: CONTRACT,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error._tag).toBe("NotFound");
+  });
+
+  it("returns UpstreamUnavailableError (503) for a -32603-derived ContractFunctionRevertedError without revert data", async () => {
+    // Many providers emit -32603 "internal error" for transient node
+    // failures; viem's getContractError still wraps those in
+    // ContractFunctionRevertedError. Replay that exact chain and assert
+    // it stays on the retryable path instead of a permanent 404.
+    const client = makeClient({
+      read: () => {
+        throw getContractError(
+          new InternalRpcError(
+            new RpcRequestError({
+              body: { method: "eth_call" },
+              url: "http://rpc.internal:8545",
+              error: { code: -32603, message: "internal error: missing trie node" },
+            }),
+          ),
+          { abi: [], address: CONTRACT, args: [], functionName: "eip712Domain" },
+        );
+      },
+    });
+    const r = await fetchEip712DomainNameVersion({
+      client,
+      chainId: 1,
+      verifyingContract: CONTRACT,
+    });
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error._tag).toBe("UpstreamUnavailable");
+      if (r.error._tag === "UpstreamUnavailable") expect(r.error.status).toBe(503);
     }
   });
 

@@ -23,10 +23,11 @@ export type AnvilPool = {
  * Boot a fresh anvil pool. Defaults: clean (no fork), instant mining,
  * 31337 chainId, 10 funded dev accounts.
  */
-export async function startAnvilPool(opts?: { port?: number }): Promise<AnvilPool> {
+export async function startAnvilPool(opts?: { port?: number; limit?: number }): Promise<AnvilPool> {
   const server = Server.create({
-    host: "127.0.0.1",
-    port: opts?.port ?? 0, // 0 = OS-assigned free port
+    // Cap the pool so stray/forged worker ids can't spawn unbounded anvil
+    // processes; comfortably above any realistic vitest worker count.
+    limit: opts?.limit ?? 64,
     instance: Instance.anvil({
       chainId: 31337,
       // No `blockTime` — default is instant mining (one block per tx)
@@ -41,7 +42,26 @@ export async function startAnvilPool(opts?: { port?: number }): Promise<AnvilPoo
     }),
   });
 
-  await server.start();
+  // Bind ourselves instead of calling `server.start()`: prool ignores `host`
+  // whenever `port` is falsy (its port-0 branch is a bare `server.listen(cb)`,
+  // which binds an OS-assigned port on ALL interfaces), and its start() has no
+  // reject path, so a fixed-port EADDRINUSE would surface as an uncaught
+  // 'error' event that kills the process. Listening directly keeps the pool
+  // loopback-only and makes bind failures catchable by the caller.
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once("error", onError);
+    server.listen(opts?.port ?? 0, "127.0.0.1", () => {
+      server.removeListener("error", onError);
+      // Keep a listener attached for the server's lifetime: a post-bind
+      // 'error' event with no listener is an uncaught exception that
+      // kills the whole vitest process instead of failing one test.
+      server.on("error", (error: Error) => {
+        console.error("[anvil-pool] server error after bind:", error);
+      });
+      resolve();
+    });
+  });
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("prool server did not bind to a port");

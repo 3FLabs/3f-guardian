@@ -36,6 +36,12 @@ export function resolveError(err: GuardianError, requestId: string): ResolvedErr
       status: 415,
       envelope: envelope("bad_request", e.message, requestId),
     }),
+    PayloadTooLarge: (e): ResolvedError => ({
+      // Like 415, 413 has no machine-readable code in §6.5; reuse
+      // bad_request.
+      status: 413,
+      envelope: envelope("bad_request", e.message, requestId),
+    }),
     UnsupportedChain: (e): ResolvedError => ({
       status: 400,
       envelope: envelope("unsupported_chain", e.message, requestId, {
@@ -66,6 +72,7 @@ export function resolveError(err: GuardianError, requestId: string): ResolvedErr
     UpstreamUnavailable: (e): ResolvedError => ({
       status: e.status,
       envelope: envelope("upstream_unavailable", e.message, requestId),
+      ...(e.retryAfterSeconds !== undefined && { retryAfterSeconds: e.retryAfterSeconds }),
     }),
   });
 }

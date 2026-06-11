@@ -1,4 +1,5 @@
-import type { AsyncCache } from "./types.js";
+import type { StandardSchemaV1 } from "./standard-schema.js";
+import { AsyncCache } from "./types.js";
 
 /**
  * Configuration for the default in-memory cache.
@@ -7,22 +8,48 @@ import type { AsyncCache } from "./types.js";
  *    omitted entries live forever (until evicted by `maxEntries`).
  *  - `maxEntries`   — soft LRU bound. When the map exceeds this size on
  *    `set`, expired entries are swept first; if still over, the oldest
- *    insertion-ordered entries are evicted until the map fits. A value
- *    of `0` (default) disables the bound.
+ *    insertion-ordered entries are evicted until the map fits. Defaults
+ *    to `4096` so a zero-config cache keyed by request-supplied input
+ *    cannot grow without bound; pass an explicit `0` to disable the
+ *    bound (opt-in to unbounded growth).
  *  - `now`          — clock injection for tests. Defaults to `Date.now`.
  *    Must return milliseconds since epoch.
+ *  - `onValidationFailure` — observability hook invoked when a stored
+ *    value fails schema validation on read (see
+ *    `AsyncCache.onValidationFailure`). The read still reports a miss
+ *    and the entry is purged; use this to log/meter what would
+ *    otherwise be invisible cache poisoning or version skew.
  */
 export type InMemoryCacheOptions = {
   readonly defaultTtlMs?: number;
   readonly maxEntries?: number;
   readonly now?: () => number;
+  readonly onValidationFailure?: (
+    key: string,
+    issues: ReadonlyArray<StandardSchemaV1.Issue>,
+  ) => void;
 };
+
+/** Default `maxEntries` bound applied when none is configured. */
+export const DEFAULT_MAX_ENTRIES = 4096;
 
 /**
  * Single-process Map-backed `AsyncCache`. Suitable for development,
- * single-replica deployments, and unit tests. Each entry stores its
- * absolute `expiresAt` (ms since epoch) so expiry is decided lazily on
- * `get` — no background timers, no scheduling.
+ * single-replica deployments, and unit tests. The value type is
+ * inferred from `schema`'s output — any Standard Schema (zod v4,
+ * valibot, arktype, …) works:
+ *
+ * ```ts
+ * const cache = inMemoryCache(zA1OnChainData, { defaultTtlMs: 60_000 });
+ * //    ^ AsyncCache<A1OnChainData>
+ * ```
+ *
+ * Each entry stores its absolute `expiresAt` (ms since epoch) so
+ * expiry is decided lazily on `get` — no background timers, no
+ * scheduling. Values are stored by reference; the inherited `get`
+ * still re-validates each hit against the schema, so an entry that no
+ * longer parses (e.g. seeded by older code across a hot reload) reads
+ * as a miss rather than a corrupt hit.
  *
  * Eviction policy: lazy on read (expired entries are removed on `get`),
  * plus an opportunistic sweep + insertion-order trim on every `set`
@@ -32,69 +59,103 @@ export type InMemoryCacheOptions = {
  * times.
  *
  * For multi-replica deployments substitute a transport-backed
- * `AsyncCache` (Redis, Memcached, Cloudflare KV). Concurrent
+ * `AsyncCache` subclass (Redis, Memcached, Cloudflare KV). Concurrent
  * reads/writes within a single process are safe: the underlying `Map`
  * mutations are sync, and the cache is correctness-permissive (a stale
  * read just triggers a redundant on-chain fetch, never a wrong answer).
  */
-export function inMemoryCache<V>(options: InMemoryCacheOptions = {}): AsyncCache<V> {
-  const { defaultTtlMs, maxEntries = 0, now = Date.now } = options;
+export function inMemoryCache<V>(
+  schema: StandardSchemaV1<unknown, V>,
+  options: InMemoryCacheOptions = {},
+): AsyncCache<V> {
+  return new InMemoryCache(schema, options);
+}
 
-  if (defaultTtlMs !== undefined && (!Number.isFinite(defaultTtlMs) || defaultTtlMs <= 0)) {
-    throw new Error(`inMemoryCache: defaultTtlMs must be > 0, got ${defaultTtlMs}`);
+class InMemoryCache<V> extends AsyncCache<V> {
+  private readonly defaultTtlMs: number | undefined;
+  private readonly maxEntries: number;
+  private readonly now: () => number;
+  private readonly notifyValidationFailure: InMemoryCacheOptions["onValidationFailure"];
+  private readonly map = new Map<string, { value: V; expiresAt: number }>();
+
+  constructor(schema: StandardSchemaV1<unknown, V>, options: InMemoryCacheOptions) {
+    super(schema);
+    const { defaultTtlMs, maxEntries = DEFAULT_MAX_ENTRIES, now = Date.now } = options;
+
+    if (defaultTtlMs !== undefined && (!Number.isFinite(defaultTtlMs) || defaultTtlMs <= 0)) {
+      throw new Error(`inMemoryCache: defaultTtlMs must be > 0, got ${defaultTtlMs}`);
+    }
+    if (!Number.isFinite(maxEntries) || maxEntries < 0 || !Number.isInteger(maxEntries)) {
+      throw new Error(
+        `inMemoryCache: maxEntries must be a non-negative integer, got ${maxEntries}`,
+      );
+    }
+
+    this.defaultTtlMs = defaultTtlMs;
+    this.maxEntries = maxEntries;
+    this.now = now;
+    this.notifyValidationFailure = options.onValidationFailure;
   }
-  if (!Number.isFinite(maxEntries) || maxEntries < 0 || !Number.isInteger(maxEntries)) {
-    throw new Error(`inMemoryCache: maxEntries must be a non-negative integer, got ${maxEntries}`);
+
+  protected override onValidationFailure(
+    key: string,
+    issues: ReadonlyArray<StandardSchemaV1.Issue>,
+  ): void {
+    this.notifyValidationFailure?.(key, issues);
   }
 
-  type Entry = { value: V; expiresAt: number };
-  const map = new Map<string, Entry>();
+  protected override async rawGet(key: string): Promise<unknown> {
+    const entry = this.map.get(key);
+    if (entry === undefined) return undefined;
+    if (entry.expiresAt <= this.now()) {
+      this.map.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
 
-  function sweepExpired(currentTime: number): void {
-    for (const [key, entry] of map) {
-      if (entry.expiresAt <= currentTime) map.delete(key);
+  override async set(key: string, value: V, opts?: { ttlMs?: number }): Promise<void> {
+    const ttl = opts?.ttlMs ?? this.defaultTtlMs;
+    // Same predicate the constructor applies to `defaultTtlMs`. NaN
+    // would otherwise produce an immortal entry (`NaN <= now` is
+    // false in both the get-expiry check and the sweep) and 0 /
+    // negative would silently disable the cache. Throwing is safe:
+    // the AsyncCache contract requires callers to treat a throwing
+    // `set` as best-effort.
+    if (ttl !== undefined && (!Number.isFinite(ttl) || ttl <= 0)) {
+      throw new Error(`inMemoryCache: ttlMs must be > 0, got ${ttl}`);
+    }
+    const expiresAt = ttl === undefined ? Number.POSITIVE_INFINITY : this.now() + ttl;
+    // Re-insert to refresh insertion order — keeps recently-written
+    // keys further from the trim eviction frontier.
+    this.map.delete(key);
+    this.map.set(key, { value, expiresAt });
+
+    if (this.maxEntries > 0 && this.map.size > this.maxEntries) {
+      this.sweepExpired(this.now());
+      this.trimToBound();
     }
   }
 
-  function trimToBound(): void {
-    if (maxEntries === 0 || map.size <= maxEntries) return;
+  override async delete(key: string): Promise<void> {
+    this.map.delete(key);
+  }
+
+  private sweepExpired(currentTime: number): void {
+    for (const [key, entry] of this.map) {
+      if (entry.expiresAt <= currentTime) this.map.delete(key);
+    }
+  }
+
+  private trimToBound(): void {
+    if (this.maxEntries === 0 || this.map.size <= this.maxEntries) return;
     // Map iteration is insertion-order; oldest first.
-    const overflow = map.size - maxEntries;
+    const overflow = this.map.size - this.maxEntries;
     let removed = 0;
-    for (const key of map.keys()) {
+    for (const key of this.map.keys()) {
       if (removed >= overflow) break;
-      map.delete(key);
+      this.map.delete(key);
       removed++;
     }
   }
-
-  return {
-    async get(key) {
-      const entry = map.get(key);
-      if (entry === undefined) return undefined;
-      if (entry.expiresAt <= now()) {
-        map.delete(key);
-        return undefined;
-      }
-      return entry.value;
-    },
-
-    async set(key, value, opts) {
-      const ttl = opts?.ttlMs ?? defaultTtlMs;
-      const expiresAt = ttl === undefined ? Number.POSITIVE_INFINITY : now() + ttl;
-      // Re-insert to refresh insertion order — keeps recently-written
-      // keys further from the trim eviction frontier.
-      map.delete(key);
-      map.set(key, { value, expiresAt });
-
-      if (maxEntries > 0 && map.size > maxEntries) {
-        sweepExpired(now());
-        trimToBound();
-      }
-    },
-
-    async delete(key) {
-      map.delete(key);
-    },
-  };
 }

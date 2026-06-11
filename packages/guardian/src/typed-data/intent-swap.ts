@@ -77,6 +77,10 @@ export function canonicaliseSwapLegs(legs: readonly SwapLeg[]): readonly [SwapLe
 /**
  * Builds the EIP-712 typed-data payload for §7.5 `intent-swaps`.
  *
+ * `domain.verifyingContract` MUST equal `body.facility`; a mismatch
+ * throws — signing under the wrong verifier yields a digest the
+ * on-chain `swap` could never accept.
+ *
  * The legs are canonicalised first; the resulting (id1, token1) pair
  * is the leg with the lower intent id (or asset, on tie), so the
  * signature is stable regardless of caller-side ordering.
@@ -86,6 +90,9 @@ export function buildIntentSwapTypedData(args: {
   body: IntentSwapBody;
 }): GuardianTypedData<typeof swapParamsTypes, "SwapParams"> {
   const { domain, body } = args;
+  if (domain.verifyingContract.toLowerCase() !== body.facility.toLowerCase()) {
+    throw new Error("buildIntentSwapTypedData: domain.verifyingContract must equal body.facility");
+  }
   const [first, second] = canonicaliseSwapLegs(body.legs);
   const typedData: SwapParamsTypedData = {
     domain,

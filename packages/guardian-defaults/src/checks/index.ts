@@ -1,10 +1,12 @@
 export type { CheckRunner, CheckRunnerError } from "./types.js";
 
 export {
+  bpsToleranceWithWeiFloor,
   checkDeadline,
   checkMembership,
   checkNonceWindow,
   checkSwapPriceTolerance,
+  DEADLINE_CHECK_DESCRIPTION,
   failed,
   passed,
   rollUp,
@@ -13,6 +15,7 @@ export {
 
 export {
   buildIntentRequestBindingChecks,
+  zA1OnChainData,
   type A1Deps,
   type A1OnChainData,
   type IntentRequestBindingPolicy,
@@ -27,5 +30,6 @@ export { buildIntentSwapChecks, type IntentSwapPolicy } from "./intent-swap.js";
 
 export {
   buildRequestWhitelistingChecks,
+  DEFAULT_MAX_REQUEST_CONTRACTS,
   type RequestWhitelistingPolicy,
 } from "./request-whitelisting.js";

@@ -7,17 +7,33 @@ on:
   # main-push pipeline and would otherwise duplicate the run.
   workflow_call:
 
+# Verification only ever reads the repo. When called from release.yml this can
+# only narrow (never expand) whatever the caller granted.
+permissions:
+  contents: read
+
 jobs:
   verify:
     name: build + lint + typecheck + test + integration
     runs-on: ubuntu-latest
+    # The whole suite finishes in ~1 minute; a hung anvil/network step
+    # should fail loudly, not burn the runner's 6-hour default.
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      # No later step needs git credentials (we never push from CI), so
+      # don't leave the GITHUB_TOKEN sitting in .git/config for the rest
+      # of the job — release.yml calls this workflow and its token may
+      # carry write scopes.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          bun-version: latest
+          persist-credentials: false
+
+      # Bun version is pinned via the root package.json `packageManager`
+      # field — one source of truth shared by local dev and release.yml.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
 
       # vitest 4 spawns Node child workers (its `forks` pool, used by
       # the integration config) and prool 0.2.4 calls
@@ -25,23 +41,48 @@ jobs:
       # anvil instance. The runner's default Node is older, so install
       # an explicit modern version. Aligned with `release.yml`.
       - name: Setup Node.js (for vitest workers)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24
 
       # `anvil` is required by the prool-backed integration suite (one
       # instance per vitest worker, multiplexed via path-routed URLs in
-      # `@3flabs/guardian-test-fixtures`). The toolchain action puts
-      # `anvil` / `forge` / `cast` on `PATH`; we don't run `forge build`
-      # here because all foundry artifacts are bundled in
-      # `packages/guardian-test-fixtures/artifacts/`.
+      # `@3flabs/guardian-test-fixtures`) and `forge` by the local
+      # fixture build below; sibling-repo artifacts stay bundled in
+      # `packages/guardian-test-fixtures/artifacts/`. Pinned to v1.7.1
+      # — the latest foundry release, matching local dev and the
+      # bundled fixtures — rather than `stable` so runs are
+      # reproducible. Known tradeoff: the action fetches the foundryup
+      # installer from foundry HEAD at run time, so the action SHA pin
+      # does not pin the installer script, and foundryup's attestation
+      # check is best-effort (it skips rather than fails when `gh` /
+      # the attestation API is unavailable) — the binaries are NOT
+      # cryptographically verified end-to-end. Accepted for now; the
+      # alternative is vendoring a checksummed tarball download.
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
         with:
-          version: stable
+          version: v1.7.1
 
       - name: Install
         run: bun install --frozen-lockfile
+
+      # Compile the locally-vendored test contracts so the fixtures
+      # check below byte-compares the two `local` artifacts against a
+      # fresh build. `contracts/out` is gitignored and sibling repos
+      # don't exist on a plain runner, so without this step the drift
+      # check validates stamps only — a PR could edit a local `.sol`
+      # without re-extracting and stay green.
+      - name: Build local fixture contracts
+        run: forge build --root packages/guardian-test-fixtures/contracts
+
+      # Validates the bundled contract fixtures (artifact integrity +
+      # INDEX consistency) and byte-compares the local artifacts against
+      # the forge output built above. Sibling-repo drift detection is
+      # still skipped with a notice when the sibling checkouts aren't
+      # present — which is always the case on a plain runner.
+      - name: Fixtures check
+        run: bun run fixtures:check
 
       # Build first so downstream packages resolve the workspace
       # dependency's `dist/index.d.ts` (per the `exports` map). Without

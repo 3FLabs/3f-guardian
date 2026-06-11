@@ -8,17 +8,33 @@ stays effective:
 - **Logger** (`/logger`) — pino + pino-pretty backed structured logger.
 - **Rate limiter** (`/rate-limit`) — single-process fixed-window in-memory counter with a pluggable store.
 - **Cache** (`/cache`) — generic `AsyncCache<V>` interface plus an in-memory implementation, used by §A.1 / §A.4 to amortise on-chain reads, and by the `makeSign*` orchestrators to amortise ERC-5267 `eip712Domain()` reads.
-- **Checks** (`/checks`) — Appendix-A check-runner builders for the four signing endpoints, plus the on-chain ABIs they read.
+- **Checks** (`/checks`) — Appendix-A check-runner builders for the four signing endpoints. (The on-chain ABIs they read are exported from the package root — see the [ABIs](#abis) section.)
 
 The package depends on `@3flabs/guardian` for its types (`Logger`, `TokenInfo`, `RateLimitWindow`,
 `SigningContext`, error classes, body schemas) and on `viem` for the on-chain reads.
 
+## Contents
+
+- [Install](#install)
+- [Full quickstart — a working Guardian on a private key](#full-quickstart--a-working-guardian-on-a-private-key)
+- [Logger](#logger)
+- [Rate limiter](#rate-limiter)
+- [Cache](#cache)
+- [Checks](#checks)
+  - [The four builders](#the-four-builders)
+  - [Scan & failure semantics](#scan--failure-semantics)
+  - [Policy shapes](#policy-shapes)
+  - [Helpers](#helpers)
+- [ABIs](#abis)
+- [Running integration tests](#running-integration-tests)
+- [License](#license)
+
 ## Install
 
 ```bash
-bun add @3flabs/guardian @3flabs/guardian-defaults viem
+bun add @3flabs/guardian @3flabs/guardian-defaults viem better-result
 # or
-npm install @3flabs/guardian @3flabs/guardian-defaults viem
+npm install @3flabs/guardian @3flabs/guardian-defaults viem better-result
 ```
 
 ## Full quickstart — a working Guardian on a private key
@@ -44,6 +60,7 @@ import { Result } from "better-result";
 import { http, createPublicClient, type Hex, type PublicClient } from "viem";
 import { mainnet, base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
+import { z } from "zod";
 
 import {
   buildGuardianServer,
@@ -66,7 +83,7 @@ import {
   buildIntentRequestBindingChecks,
   buildIntentSwapChecks,
   buildRequestWhitelistingChecks,
-  type A1OnChainData,
+  zA1OnChainData,
   type IntentFundBindingPolicy,
   type IntentRequestBindingPolicy,
   type IntentSwapPolicy,
@@ -124,12 +141,16 @@ const TOKENS = new Map<string, TokenInfo>([
 //
 // Two independent caches — see the "Cache" section below for the
 // rationale on splitting them. Sized for a small operator; bump
-// `maxEntries` for high-traffic deployments.
-const eip712DomainCache = inMemoryCache<{ name: string; version: string }>({
+// `maxEntries` for high-traffic deployments. The first argument is a
+// schema (any Standard Schema — zod, valibot, arktype) that every hit
+// is re-validated against on read; a value that fails to parse counts
+// as a miss, so a poisoned or stale-shaped entry can never reach the
+// checks.
+const eip712DomainCache = inMemoryCache(z.object({ name: z.string(), version: z.string() }), {
   defaultTtlMs: 24 * 60 * 60_000, // 24h — domains are immutable absent a contract upgrade
   maxEntries: 256,
 });
-const a1OnChainCache = inMemoryCache<A1OnChainData>({
+const a1OnChainCache = inMemoryCache(zA1OnChainData, {
   defaultTtlMs: 5 * 60_000, // 5min — Request roles change rarely but not never
   maxEntries: 1024,
 });
@@ -266,7 +287,7 @@ Smoke test:
 
 ```bash
 curl -s localhost:3000/health
-# {"ok":true}
+# {"status":"ok"}
 
 curl -s localhost:3000/version
 # {"apiVersion":"v1","build":"0.1.0","guardianSigner":"0x…","supportedChains":[1,8453]}
@@ -274,9 +295,14 @@ curl -s localhost:3000/version
 curl -s localhost:3000/v1/facility/intent-request-bindings \
   -H "Authorization: Bearer dev-token" \
   -H "Content-Type: application/json" \
+  -H "X-Client-Name: smoke-test" \
+  -H "X-Client-Version: 1.0.0" \
   -d '{ "chainId": 1, "facility": "0x…", "intent": { "id": "1" }, "requestContract": "0x…", "deadline": 9999999999 }'
 # either { ...SigningSuccess } or { error: "validation_failed", checks: [...] }
 ```
+
+The §6.2 `X-Client-Name` / `X-Client-Version` headers are required on every protected
+`/v1/*` route — a missing or malformed value yields `400 bad_request`.
 
 `buildGuardianServer` returns a vanilla [Elysia](https://elysiajs.com/) instance — `.listen`,
 `.handle` (for tests), `.use` (for further composition) all work as you'd expect.
@@ -297,10 +323,24 @@ const logger = pinoLogger({
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `level` | `"trace" \| "debug" \| "info" \| "warn" \| "error" \| "fatal"` | `LOG_LEVEL` env, else `"info"` | |
+| `level` | `"trace" \| "debug" \| "info" \| "warn" \| "error" \| "fatal" \| "silent"` | `LOG_LEVEL` env, else `"info"` | `LOG_LEVEL` is case-insensitive and accepts the syslog-style alias `warning` (→ `warn`); unrecognised values fall back to `"info"` with a one-time stderr warning instead of crashing pino at construction. |
 | `pretty` | `boolean` | auto: `process.stdout.isTTY` | When `false`, emits NDJSON for log shippers. |
 | `bindings` | `Record<string, unknown>` | — | Top-level fields stamped onto every record. |
-| `redact` | `readonly string[]` | conservative defaults | Pino redact paths. The default list masks `Authorization`, `X-Guardian-Signature`, `X-Guardian-Timestamp`, and any field literally named `hmacSecret` / `secret`. |
+| `redact` | `readonly string[]` | `DEFAULT_REDACT_PATHS` | Pino redact paths. The defaults mask `Authorization`, `X-Guardian-Signature`, `X-Guardian-Timestamp`, and `hmacSecret` / `secret` / `privateKey` fields up to two levels deep (e.g. `auth.tokenInfo.hmacSecret`). |
+
+Supplying `redact` REPLACES the defaults. `DEFAULT_REDACT_PATHS` is exported from
+`@3flabs/guardian-defaults/logger` so hosts can merge it with their own paths:
+
+```ts
+import { DEFAULT_REDACT_PATHS, pinoLogger } from "@3flabs/guardian-defaults/logger";
+
+const logger = pinoLogger({
+  redact: [...DEFAULT_REDACT_PATHS, "config.db.password"],
+});
+```
+
+Note pino wildcards match exactly one path segment — there is no recursive wildcard — so
+secrets nested three or more levels deep still need host-supplied paths.
 
 The returned value is a `pino.Logger` cast to the Guardian `Logger` contract.
 
@@ -325,9 +365,22 @@ const accountRateLimit = inMemoryRateLimiter({
 | `keyOf` | `(token: TokenInfo) => string` | `(t) => t.tokenId` | Extract the rate-limit key. |
 | `store` | `RateLimitStore` | `inMemoryRateLimitStore()` | Pluggable storage. |
 
-For multi-replica deployments, supply your own `RateLimitStore` backed by a transactional
-primitive (Redis `INCR + EXPIRE`, Cloudflare Durable Object). The single-process Map-based
-default is not atomic across processes.
+`RateLimitStore` exposes `read` / `write` plus an optional atomic
+`consume(key, limit, windowSeconds, nowSec)` returning a `RateLimitDecision`
+(`{ allowed, count, resetUnixSeconds }`; both types are exported from
+`@3flabs/guardian-defaults/rate-limit`). The limiter delegates the check-and-increment to
+`store.consume` when available; for custom stores exposing only `read` / `write` it
+serialises the read-modify-write per key in-process, so a concurrent burst cannot bypass
+the per-token limit — but that fallback is single-process safe only. The bundled
+`inMemoryRateLimitStore` implements `consume`.
+
+For multi-replica deployments, supply your own `RateLimitStore` and implement `consume` on
+a transactional primitive (Redis `INCR` + `EXPIRE`, a Cloudflare Durable Object). The
+single-process Map-based default is not atomic across processes.
+
+`resetUnixSeconds` and `retryAfterSeconds` are rounded up to whole seconds, so `Retry-After`
+and `X-RateLimit-Reset` are always RFC-9110-valid integers even with a fractional
+`windowSeconds`.
 
 ## Cache
 
@@ -338,16 +391,31 @@ Two distinct cache surfaces — keep them separate so TTLs and eviction policies
 | EIP-712 domain | `{ name: string; version: string }` | `eip712Domain()` reads per `(chainId, verifyingContract)` — used by the `makeSign*` orchestrators in `@3flabs/guardian`. | 24h (immutable absent contract upgrade) |
 | §A.1 / §A.4 on-chain | `A1OnChainData` | Request-contract roles + factory linkage scanned by the §A.1 runner (also used by §A.4 per-contract). | 1–5 min |
 
-```ts
-import { inMemoryCache, type AsyncCache } from "@3flabs/guardian-defaults/cache";
-import type { A1OnChainData } from "@3flabs/guardian-defaults/checks";
+Every cache is constructed with a schema — any [Standard Schema](https://standardschema.dev)
+(zod ≥ 3.24 / v4, valibot ≥ 1.0, arktype ≥ 2.0, …) — and the value type is inferred from
+the schema's output. `get` re-validates each raw hit through the schema (`safeParse`-style,
+non-throwing); a stored value that fails to parse is reported as a **miss**, never returned,
+so a poisoned, truncated, or old-package-version entry in a shared store falls back to a
+fresh authoritative fetch. `zA1OnChainData` is exported from `./checks` so you don't have to
+hand-roll the §A.1 discriminated-union schema.
 
-const eip712DomainCache: AsyncCache<{ name: string; version: string }> = inMemoryCache({
+The schema MUST be idempotent over its own output: `set` stores the schema's **output**
+type and `get` re-validates exactly that shape, so transforming schemas whose output no
+longer parses (e.g. `z.string().transform(s => s.length)`) silently turn every hit into a
+miss, and re-applicable transforms would re-run on every read. Pure validation schemas are
+always safe.
+
+```ts
+import { z } from "zod";
+import { inMemoryCache, type AsyncCache } from "@3flabs/guardian-defaults/cache";
+import { zA1OnChainData, type A1OnChainData } from "@3flabs/guardian-defaults/checks";
+
+const eip712DomainCache = inMemoryCache(z.object({ name: z.string(), version: z.string() }), {
   defaultTtlMs: 24 * 60 * 60_000,
   maxEntries: 256,
 });
 
-const a1OnChainCache: AsyncCache<A1OnChainData> = inMemoryCache({
+const a1OnChainCache: AsyncCache<A1OnChainData> = inMemoryCache(zA1OnChainData, {
   defaultTtlMs: 5 * 60_000,
   maxEntries: 1024,
 });
@@ -358,12 +426,41 @@ const a1OnChainCache: AsyncCache<A1OnChainData> = inMemoryCache({
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `defaultTtlMs` | `number` | unset | Applied when `set` is called without `ttlMs`. If omitted, entries live forever (until evicted by `maxEntries`). |
-| `maxEntries` | `number` | `0` (unbounded) | Soft LRU bound. On overflow: sweep expired, then trim oldest insertion-ordered entries. |
+| `maxEntries` | `number` | `4096` (`DEFAULT_MAX_ENTRIES`) | Soft LRU bound. On overflow: sweep expired, then trim oldest insertion-ordered entries. Pass an explicit `0` to opt back into unbounded growth. |
 | `now` | `() => number` | `Date.now` | Clock injection for tests. |
 
-`AsyncCache<V>` is a 3-method interface (`get`, `set`, `delete`). Implementations are free
-to back it with Redis / Memcached / KV; transport-backed adapters MUST handle their own
-serialisation (the in-memory cache stores by reference and side-steps serialisation entirely).
+`set` throws on a non-finite or non-positive per-call `ttlMs` (e.g. `NaN` from an unset env
+var) instead of silently creating an immortal or instantly-expiring entry; callers already
+treat a throwing `set` as best-effort per the `AsyncCache` contract.
+
+`AsyncCache<V>` is an abstract class. The base class owns the validated read path (`get`);
+implementations subclass it and provide the raw storage primitives — a protected
+`rawGet(key): Promise<unknown>` (return `undefined` for miss/expired, no validation) plus
+`set` and `delete`. Back it with Redis / Memcached / KV freely; transport-backed adapters
+MUST handle their own serialisation and revive the domain shape (`Map` ↔ entries,
+`bigint` ↔ `string`) before `rawGet` returns, so the schema sees the same shape `set`
+received (the in-memory cache stores by reference and side-steps serialisation entirely):
+
+```ts
+import { AsyncCache } from "@3flabs/guardian-defaults/cache";
+import { zA1OnChainData, type A1OnChainData } from "@3flabs/guardian-defaults/checks";
+
+class RedisA1Cache extends AsyncCache<A1OnChainData> {
+  constructor(private readonly redis: RedisClient) {
+    super(zA1OnChainData);
+  }
+  protected async rawGet(key: string): Promise<unknown> {
+    const raw = await this.redis.get(key);
+    return raw === null ? undefined : reviveA1(JSON.parse(raw)); // Map/bigint revival
+  }
+  async set(key: string, value: A1OnChainData, options?: { ttlMs?: number }): Promise<void> {
+    await this.redis.set(key, serialiseA1(value), options?.ttlMs);
+  }
+  async delete(key: string): Promise<void> {
+    await this.redis.del(key);
+  }
+}
+```
 
 ## Checks
 
@@ -404,7 +501,8 @@ const signIntentSwap = makeSignIntentSwap({
 `makeSign*` reads each verifying contract's EIP-712 domain (`name`/`version`)
 via ERC-5267 `eip712Domain()` and hands the matching typed-data to
 `ctx.signTypedData`. Pass an optional `cache` (`AsyncCache<{ name; version }>`
-— `inMemoryCache` qualifies) to amortise the domain read across signing calls.
+— `inMemoryCache` constructed with a `{ name, version }` schema qualifies) to
+amortise the domain read across signing calls.
 
 For callers that need the raw building blocks, the four `build*TypedData`
 helpers (`buildIntentRequestBindingTypedData`, `buildIntentFundBindingTypedData`,
@@ -428,6 +526,44 @@ viem-driven, not ABI-agnostic.
 `StateConflictError` — the §A.2 fund-state check is the only 409-class check in v1. Per
 §6.6.1 it returns `ValidationFailedError` over `StateConflictError` when both classes fail.
 
+### Scan & failure semantics
+
+The §A.1 role-events scan (also run per request contract by §A.4 whitelist ops) walks
+`getLogs` backwards in `eventScanBlockRange`-sized chunks — every chunk, including the
+deepest one, spans at most `eventScanBlockRange` blocks, so providers with a hard range
+limit equal to the configured range never reject a chunk.
+
+- **Lookback exhausted** — when the scan exhausts `eventScanMaxLookbackBlocks` without
+  observing the contract's deployment, role grants observed inside the scanned window are
+  still evaluated one-sidedly: any non-accepted puller / consumer holder observed in-window
+  fails the §A.1 / §A.4 checks (422). Partial data can only reject, never approve. The
+  residual disposition is governed by `onLookbackExhausted`: `"skip"` (default) emits the
+  role checks as skipped, `"fail"` fails closed (422).
+- **Scan budget** — `eventScanDeadlineMs` (optional) bounds a single scan's wall clock;
+  when exceeded the request fails `503 upstream_unavailable` instead of holding the
+  handler indefinitely.
+- **422 vs 503** — a deterministic `owner()` failure (revert / no return data, e.g. an EOA
+  or unrelated contract supplied as `requestContract`) is classified as a cached `noFactory`
+  result that fails the "deployed by an accepted factory" check (422). A deterministic
+  `isRequest()` failure on an operator-configured accepted factory is a configuration
+  error, not a client error: it is logged at error level and treated as a non-match, and if
+  no healthy factory recognises the contract the request fails `503 upstream_unavailable`
+  and is never cached. Likewise a `whitelistBook` whose nonce reads deterministically revert
+  or return no data (e.g. an EOA) fails a 422 "whitelist book exposes per-validator nonce
+  state" check. `503 upstream_unavailable` covers genuine transport-level RPC failures and
+  the failed-factory-slot case above.
+- **§A.4 request guards** — before any RPC: a `requestContracts` batch larger than
+  `maxRequestContracts` (default `DEFAULT_MAX_REQUEST_CONTRACTS = 50`, exported from
+  `@3flabs/guardian-defaults/checks`) fails a 422 check for both whitelist and unwhitelist
+  operations — the builder throws at construction for a non-positive or fractional cap —
+  and, when `acceptedWhitelistBooks` is configured, an off-policy `whitelistBook` (the
+  EIP-712 `verifyingContract`) fails a 422 "whitelist book is on the accepted-books list"
+  check.
+- **Swap tolerance** — `buildIntentSwapChecks` throws a `TypeError` at construction when
+  `swapPriceToleranceBps` is not a non-negative integer. Whenever the bps is > 0 the
+  tolerance is floored at 1 wei, so small legs (`expectedDebt × bps < 10,000`) retain the
+  documented ~1 wei mulDiv rounding slack; `0` still means strict equality.
+
 ### Policy shapes
 
 Every policy keys per-chain accepted sets by EIP-155 chain id; address comparisons are
@@ -440,8 +576,10 @@ type IntentRequestBindingPolicy = {
   acceptedOwners:           ReadonlyMap<number, ReadonlySet<string>>;
   acceptedPullers:          ReadonlyMap<number, ReadonlySet<string>>;
   acceptedConsumers:        ReadonlyMap<number, ReadonlySet<string>>;
-  eventScanBlockRange:        bigint;  // chunk size for getLogs
+  eventScanBlockRange:        bigint;  // chunk size for getLogs (every chunk ≤ this)
   eventScanMaxLookbackBlocks: bigint;  // give-up horizon
+  eventScanDeadlineMs?:       number;  // wall-clock budget per scan; exceeded ⇒ 503
+  onLookbackExhausted?: "skip" | "fail"; // role checks when the horizon is exhausted (default "skip")
 };
 
 type IntentFundBindingPolicy = {
@@ -454,11 +592,13 @@ type IntentSwapPolicy = {
   maxDeadlineSecondsAhead: number;
   acceptedPmFactories: ReadonlyMap<number, ReadonlySet<string>>;
   acceptedPmOwners:    ReadonlyMap<number, ReadonlySet<string>>;
-  swapPriceToleranceBps: number;       // 1 absorbs the ~1 wei mulDiv rounding
+  swapPriceToleranceBps: number;       // non-negative integer; 1 absorbs the ~1 wei mulDiv rounding
 };
 
 type RequestWhitelistingPolicy = IntentRequestBindingPolicy & {
   maxNonceAboveFloor: bigint;          // per-validator nonce window in the whitelist book
+  acceptedWhitelistBooks?: ReadonlyMap<number, ReadonlySet<string>>; // gate on the EIP-712 verifyingContract
+  maxRequestContracts?: number;        // batch cap; default DEFAULT_MAX_REQUEST_CONTRACTS (50)
 };
 ```
 
@@ -469,7 +609,8 @@ type RequestWhitelistingPolicy = IntentRequestBindingPolicy & {
   the same shape.
 - `checkDeadline`, `checkMembership`, `checkNonceWindow`, `checkSwapPriceTolerance`,
   `rollUp` — primitives the bundled runners are built from. Useful when assembling
-  custom check arrays.
+  custom check arrays. `checkSwapPriceTolerance` never throws: an invalid `toleranceBps`
+  yields a failed check entry (fail closed) instead of an exception.
 
 ## ABIs
 

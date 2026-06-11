@@ -3,10 +3,9 @@
   "compilerOptions": {
     "noEmit": true,
     "types": ["bun"],
-    "baseUrl": ".",
     "paths": {
       "@3flabs/guardian": ["../guardian/src/index.ts"]
     }
   },
-  "include": ["src/**/*", "tests/**/*"]
+  "include": ["src/**/*", "tests/**/*", "vitest.config.ts", "vitest.integration.config.ts"]
 }

@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
+import {
+  AbiDecodingZeroDataError,
+  ContractFunctionExecutionError,
+  ContractFunctionRevertedError,
+  HttpRequestError,
+} from "viem";
 
 import {
   checkDeadline,
   checkMembership,
   checkNonceWindow,
   checkSwapPriceTolerance,
+  isDeterministicContractCallFailure,
   rollUp,
 } from "../src/checks/helpers.js";
 
@@ -105,6 +112,65 @@ describe("checkSwapPriceTolerance", () => {
     });
     expect(r.passed).toBe(false);
     expect(r.reason).toContain("zero");
+  });
+
+  it("fails (without throwing) on a fractional or negative toleranceBps", () => {
+    for (const bad of [0.5, -1, Number.NaN]) {
+      const r = checkSwapPriceTolerance({
+        amountA: 1n,
+        amountB: 1n,
+        referencePriceWad: 10n ** 18n,
+        toleranceBps: bad,
+      });
+      expect(r.passed).toBe(false);
+      expect(r.reason).toMatch(/non-negative integer/);
+    }
+  });
+});
+
+describe("isDeterministicContractCallFailure", () => {
+  const abi = [
+    {
+      type: "function",
+      name: "owner",
+      inputs: [],
+      outputs: [{ type: "address" }],
+      stateMutability: "view",
+    },
+  ] as const;
+
+  it("matches a zero-data decode failure on a named function", () => {
+    const e = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi,
+      functionName: "owner",
+      contractAddress: "0x0000000000000000000000000000000000000001",
+    });
+    expect(isDeterministicContractCallFailure(e, ["owner"])).toBe(true);
+  });
+
+  it("matches a deterministic revert on a named function", () => {
+    const e = new ContractFunctionExecutionError(
+      new ContractFunctionRevertedError({ abi, functionName: "owner" }),
+      { abi, functionName: "owner", contractAddress: "0x0000000000000000000000000000000000000001" },
+    );
+    expect(isDeterministicContractCallFailure(e, ["owner"])).toBe(true);
+  });
+
+  it("rejects transport-level failures and unrelated function names", () => {
+    const transport = new ContractFunctionExecutionError(
+      new HttpRequestError({ url: "http://localhost:8545" }),
+      { abi, functionName: "owner", contractAddress: "0x0000000000000000000000000000000000000001" },
+    );
+    expect(isDeterministicContractCallFailure(transport, ["owner"])).toBe(false);
+
+    const otherFn = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi,
+      functionName: "owner",
+      contractAddress: "0x0000000000000000000000000000000000000001",
+    });
+    expect(isDeterministicContractCallFailure(otherFn, ["isRequest"])).toBe(false);
+
+    expect(isDeterministicContractCallFailure(new Error("rpc 503"), ["owner"])).toBe(false);
   });
 });
 

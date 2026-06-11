@@ -64,6 +64,32 @@ describe("§A.1 intent-request-binding — on-chain", () => {
     expect(res.error).toBeInstanceOf(ValidationFailedError);
   });
 
+  it("classifies an EOA requestContract as a 422 factory failure, not a 503", async () => {
+    const { book, clients } = fixture.snapshot();
+    const ctx = makeSigningContext({ client: clients.publicClient, chainId: book.chainId });
+    const run = buildIntentRequestBindingChecks({ policy: policyFor(book) });
+
+    // An EOA has no code: `owner()` returns empty data and the stage-1
+    // multicall decode fails deterministically. That is bad client
+    // input, not an upstream outage — it must be a ValidationFailed
+    // (422) on the factory check, never an UpstreamUnavailable (503).
+    const res = await run(ctx, {
+      chainId: book.chainId,
+      facility: book.facility,
+      intent: { id: "1" },
+      requestContract: book.accounts.owner.address as Address, // an EOA
+      deadline: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    expect(res.isErr()).toBe(true);
+    if (!res.isErr()) return;
+    expect(res.error).toBeInstanceOf(ValidationFailedError);
+    const factory = (res.error as ValidationFailedError).checks.find((c) =>
+      c.description.includes("deployed by"),
+    );
+    expect(factory?.passed).toBe(false);
+  });
+
   it("fails when the puller is not on the accepted-pullers list", async () => {
     const { book, clients } = fixture.snapshot();
     const ctx = makeSigningContext({ client: clients.publicClient, chainId: book.chainId });

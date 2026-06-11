@@ -62,10 +62,13 @@ type SharedArgs = {
 
 /**
  * Builds the EIP-712 typed-data payload for `operation = "whitelist"`.
- * `domain.verifyingContract` MUST equal `body.whitelistBook`.
+ * `domain.verifyingContract` MUST equal `body.whitelistBook`; a mismatch
+ * throws — signing under the wrong verifier yields a digest the on-chain
+ * whitelist book could never accept.
  */
 export function buildWhitelistRequestTypedData(args: SharedArgs): WhitelistRequestTypedData {
   const { domain, body, validator } = args;
+  assertDomainMatchesBook("buildWhitelistRequestTypedData", domain, body);
   const typedData: WhitelistTypedData = {
     domain,
     types: whitelistRequestTypes,
@@ -77,10 +80,13 @@ export function buildWhitelistRequestTypedData(args: SharedArgs): WhitelistReque
 
 /**
  * Builds the EIP-712 typed-data payload for `operation = "unwhitelist"`.
- * `domain.verifyingContract` MUST equal `body.whitelistBook`.
+ * `domain.verifyingContract` MUST equal `body.whitelistBook`; a mismatch
+ * throws — signing under the wrong verifier yields a digest the on-chain
+ * whitelist book could never accept.
  */
 export function buildUnwhitelistRequestTypedData(args: SharedArgs): UnwhitelistRequestTypedData {
   const { domain, body, validator } = args;
+  assertDomainMatchesBook("buildUnwhitelistRequestTypedData", domain, body);
   const typedData: UnwhitelistTypedData = {
     domain,
     types: unwhitelistRequestTypes,
@@ -106,6 +112,21 @@ export function buildRequestWhitelistingTypedData(args: {
   return operation === "whitelist"
     ? buildWhitelistRequestTypedData({ domain, body: rest, validator })
     : buildUnwhitelistRequestTypedData({ domain, body: rest, validator });
+}
+
+/**
+ * Mirrors the verifyingContract guards in `intent-request-binding.ts` /
+ * `intent-fund-binding.ts`: a domain resolved for one whitelist book must
+ * not sign a body referencing another.
+ */
+function assertDomainMatchesBook(
+  builder: string,
+  domain: Eip712Domain,
+  body: Omit<RequestWhitelistingBody, "operation">,
+): void {
+  if (domain.verifyingContract.toLowerCase() !== body.whitelistBook.toLowerCase()) {
+    throw new Error(`${builder}: domain.verifyingContract must equal body.whitelistBook`);
+  }
 }
 
 function messageOf(body: Omit<RequestWhitelistingBody, "operation">, validator: Address) {
