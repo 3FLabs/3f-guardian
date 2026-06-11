@@ -22,7 +22,8 @@ export {
   type RateLimitStore,
 } from "./rate-limit/store.js";
 
-export { type AsyncCache } from "./cache/types.js";
+export { AsyncCache } from "./cache/types.js";
+export type { StandardSchemaV1 } from "./cache/standard-schema.js";
 export {
   DEFAULT_MAX_ENTRIES,
   inMemoryCache,
@@ -43,6 +44,7 @@ export {
   passed,
   rollUp,
   skipped,
+  zA1OnChainData,
   type A1Deps,
   type A1OnChainData,
   type CheckRunner,

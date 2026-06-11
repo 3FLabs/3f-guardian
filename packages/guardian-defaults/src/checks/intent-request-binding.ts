@@ -1,5 +1,6 @@
 import { Result } from "better-result";
-import { type Address } from "viem";
+import { isAddress, type Address } from "viem";
+import { z } from "zod";
 
 import {
   type CheckEntry,
@@ -8,6 +9,7 @@ import {
   UpstreamUnavailableError,
 } from "@3flabs/guardian";
 
+import type { StandardSchemaV1 } from "../cache/standard-schema.js";
 import type { AsyncCache } from "../cache/types.js";
 import { requestAbi, ROLE_CONSUMER, ROLE_PULLER } from "../abi/request.js";
 import { requestFactoryAbi } from "../abi/request-factory.js";
@@ -127,15 +129,53 @@ export type A1OnChainData =
       readonly holders: ReadonlyMap<Address, bigint>;
     };
 
+const zCachedAddress = z.custom<Address>(
+  (v) => typeof v === "string" && isAddress(v, { strict: false }),
+  "expected an EVM address",
+);
+const zCachedHolders = z.map(zCachedAddress, z.bigint());
+
+/**
+ * Schema for {@link A1OnChainData} — pass it to an `AsyncCache`
+ * constructor (e.g. `inMemoryCache(zA1OnChainData, { … })`) so every
+ * cache hit is re-validated on read: an entry written by an older
+ * package version, truncated by a transport adapter, or hand-edited in
+ * a shared store parses as a MISS and triggers a fresh on-chain fetch
+ * instead of feeding the §A.1 evaluation corrupt data.
+ *
+ * The schema validates the in-memory domain shape (`Map` keys/values,
+ * `bigint` bitfields). Cross-process adapters that JSON-serialise must
+ * revive `Map` ↔ entries and `bigint` ↔ `string` in their `rawGet` /
+ * `set` BEFORE the schema sees the value, per the `AsyncCache`
+ * contract.
+ */
+export const zA1OnChainData = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("noFactory") }),
+  z.object({
+    kind: z.literal("tooOld"),
+    factory: zCachedAddress,
+    owner: zCachedAddress,
+    partialHolders: zCachedHolders.optional(),
+  }),
+  z.object({
+    kind: z.literal("resolved"),
+    factory: zCachedAddress,
+    owner: zCachedAddress,
+    holders: zCachedHolders,
+  }),
+]) satisfies StandardSchemaV1<unknown, A1OnChainData>;
+
 /**
  * Dependencies for the §A.1 runner. Sharable with §A.4
  * (`buildRequestWhitelistingChecks`) which delegates per-contract
  * checks to {@link runA1}.
  *
  *  - `cache` — optional {@link AsyncCache} keyed by
- *    `${chainId}:${requestContract.toLowerCase()}`. If supplied, hit
- *    skips the entire on-chain fetch (multicall + getBlockNumber + log
- *    scan). On miss the runner fetches and writes the result back.
+ *    `${chainId}:${requestContract.toLowerCase()}`, constructed with
+ *    {@link zA1OnChainData} (e.g. `inMemoryCache(zA1OnChainData)`). If
+ *    supplied, hit skips the entire on-chain fetch (multicall +
+ *    getBlockNumber + log scan). On miss the runner fetches and writes
+ *    the result back.
  *
  *  - `cacheTtlMs` — per-write TTL passed to `cache.set`. If omitted the
  *    cache implementation's default applies. Pick this in tension with

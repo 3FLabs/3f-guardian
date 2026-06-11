@@ -10,14 +10,14 @@ import {
 
 import { inMemoryCache } from "../src/cache/in-memory.js";
 import { whitelistBookAbi } from "../src/abi/whitelist-book.js";
-import type { A1OnChainData } from "../src/checks/intent-request-binding.js";
+import { zA1OnChainData } from "../src/checks/intent-request-binding.js";
 import {
   buildRequestWhitelistingChecks,
   DEFAULT_MAX_REQUEST_CONTRACTS,
   type RequestWhitelistingPolicy,
 } from "../src/checks/request-whitelisting.js";
 
-const FACTORY = "0xfaC70rfaC70rfaC70rfaC70rfaC70rfaC70rfaC0" as Address;
+const FACTORY = "0xfaC70ffaC70ffaC70ffaC70ffaC70ffaC70ffaC0" as Address;
 const RC1 = "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1" as Address;
 const RC2 = "0xc2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2" as Address;
 const OWNER = "0x000000000000000000000000000000000000000a" as Address;
@@ -438,7 +438,7 @@ describe("buildRequestWhitelistingChecks", () => {
       getLogs: () => happyEvents(RC1),
       latestBlock: 5_500n,
     });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
     const run = buildRequestWhitelistingChecks({
       policy,
       guardianSigner: GUARDIAN,

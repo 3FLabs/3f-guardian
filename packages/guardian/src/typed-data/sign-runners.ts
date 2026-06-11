@@ -51,9 +51,9 @@ type ChecksFn<TBody, TError> = (
  * Optional shared deps for the four sign-runner factories.
  *
  *  - `cache` — backs the ERC-5267 `eip712Domain()` reads with an
- *    `AsyncCache`-shaped store. The defaults package's
- *    `inMemoryCache<{ name; version }>` is the obvious choice; any
- *    structurally-compatible store works (Redis, KV).
+ *    `AsyncCache`-shaped store. The defaults package's `inMemoryCache`
+ *    constructed with a `{ name, version }` schema is the obvious
+ *    choice; any structurally-compatible store works (Redis, KV).
  *  - `cacheTtlMs` — per-write TTL for the domain cache. Domains are
  *    immutable for a given (chain, contract) absent a contract upgrade,
  *    so a 24-hour default is reasonable. Pass `undefined` to defer to

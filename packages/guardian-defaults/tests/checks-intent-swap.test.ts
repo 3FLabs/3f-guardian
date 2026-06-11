@@ -10,7 +10,7 @@ import {
 
 import { buildIntentSwapChecks, type IntentSwapPolicy } from "../src/checks/intent-swap.js";
 
-const PM_FACTORY = "0xfaC70rfaC70rfaC70rfaC70rfaC70rfaC70rfaC0" as Address;
+const PM_FACTORY = "0xfaC70ffaC70ffaC70ffaC70ffaC70ffaC70ffaC0" as Address;
 const PM = "0x1111111111111111111111111111111111111111" as Address;
 const DEBT = "0x2222222222222222222222222222222222222222" as Address;
 const COLLATERAL = "0x3333333333333333333333333333333333333333" as Address;

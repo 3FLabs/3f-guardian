@@ -13,6 +13,7 @@ export {
 
 export {
   buildIntentRequestBindingChecks,
+  zA1OnChainData,
   type A1Deps,
   type A1OnChainData,
   type IntentRequestBindingPolicy,

@@ -16,16 +16,18 @@ import {
 } from "@3flabs/guardian";
 
 import { inMemoryCache } from "../src/cache/in-memory.js";
+import { AsyncCache } from "../src/cache/types.js";
 import { requestAbi } from "../src/abi/request.js";
 import { requestFactoryAbi } from "../src/abi/request-factory.js";
 import {
   buildIntentRequestBindingChecks,
+  zA1OnChainData,
   type A1OnChainData,
   type IntentRequestBindingPolicy,
 } from "../src/checks/intent-request-binding.js";
 import { scanRoleHolders } from "../src/checks/role-events.js";
 
-const FACTORY = "0xfaC70rfaC70rfaC70rfaC70rfaC70rfaC70rfaC0" as Address;
+const FACTORY = "0xfaC70ffaC70ffaC70ffaC70ffaC70ffaC70ffaC0" as Address;
 const OTHER_FACTORY = "0x0000000000000000000000000000000000000aaa" as Address;
 const RC = "0xcccccccccccccccccccccccccccccccccccccccc" as Address;
 const OWNER = "0x000000000000000000000000000000000000000a" as Address;
@@ -408,7 +410,7 @@ describe("buildIntentRequestBindingChecks", () => {
 
   it("replays a stale cached tooOld entry without partialHolders as skipped (legacy cache shape)", async () => {
     const stub = makeClient({}); // any on-chain read would throw "unexpected multicall"
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
     // Entry written by an older package version — no partialHolders.
     await cache.set(`1:${RC.toLowerCase()}`, { kind: "tooOld", factory: FACTORY, owner: OWNER });
     const run = buildIntentRequestBindingChecks({ policy, cache });
@@ -429,7 +431,7 @@ describe("buildIntentRequestBindingChecks", () => {
     });
     // Per-slot failure of owner() (the factory slot answers normally).
     const stub = makeClient({ multicallResponses: [[eoaError, false]] });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
     const run = buildIntentRequestBindingChecks({ policy, cache });
 
     const r1 = await run(ctx(stub.client), baseBody);
@@ -499,7 +501,7 @@ describe("buildIntentRequestBindingChecks", () => {
         [OWNER, badFactoryError],
       ],
     });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
     const run = buildIntentRequestBindingChecks({ policy, cache });
 
     const r1 = await run(ctx(stub.client), baseBody);
@@ -584,7 +586,7 @@ describe("buildIntentRequestBindingChecks", () => {
       { abi: multicall3Abi, functionName: "aggregate3", args: [[]] },
     );
     const stub = makeClient({ multicallResponses: [transportError, transportError] });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
     const run = buildIntentRequestBindingChecks({ policy, cache });
     const r = await run(ctx(stub.client), baseBody);
     expect(r.isErr()).toBe(true);
@@ -737,7 +739,7 @@ describe("buildIntentRequestBindingChecks", () => {
         },
       ],
     });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
     const run = buildIntentRequestBindingChecks({ policy, cache });
 
     const r1 = await run(ctx(stub.client), baseBody);
@@ -774,7 +776,7 @@ describe("buildIntentRequestBindingChecks", () => {
         },
       ],
     });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
 
     // First call with permissive policy — cache fills.
     const r1 = await buildIntentRequestBindingChecks({ policy, cache })(ctx(stub.client), baseBody);
@@ -824,7 +826,7 @@ describe("buildIntentRequestBindingChecks", () => {
         },
       ],
     });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
 
     const r1 = await buildIntentRequestBindingChecks({ policy, cache })(ctx(stub.client), baseBody);
     expect(r1.isOk()).toBe(true);
@@ -878,7 +880,7 @@ describe("buildIntentRequestBindingChecks", () => {
       ],
     });
     let now = 1_700_000_000_000;
-    const cache = inMemoryCache<A1OnChainData>({ now: () => now });
+    const cache = inMemoryCache(zA1OnChainData, { now: () => now });
     const run = buildIntentRequestBindingChecks({ policy, cache, cacheTtlMs: 1_000 });
 
     const r1 = await run(ctx(stub.client, new Date(now)), baseBody);
@@ -897,7 +899,7 @@ describe("buildIntentRequestBindingChecks", () => {
     const stub = makeClient({
       multicallResponses: [[OWNER, false]],
     });
-    const cache = inMemoryCache<A1OnChainData>();
+    const cache = inMemoryCache(zA1OnChainData);
     const run = buildIntentRequestBindingChecks({ policy, cache });
 
     const r1 = await run(ctx(stub.client), baseBody);
@@ -929,15 +931,19 @@ describe("buildIntentRequestBindingChecks", () => {
         },
       ],
     });
-    const cache: import("../src/cache/types.js").AsyncCache<A1OnChainData> = {
-      async get() {
+    class ThrowingCache extends AsyncCache<A1OnChainData> {
+      constructor() {
+        super(zA1OnChainData);
+      }
+      protected override async rawGet(): Promise<unknown> {
         throw new Error("cache transport down");
-      },
-      async set() {
+      }
+      override async set(): Promise<void> {
         // swallow
-      },
-      async delete() {},
-    };
+      }
+      override async delete(): Promise<void> {}
+    }
+    const cache = new ThrowingCache();
     const run = buildIntentRequestBindingChecks({ policy, cache });
     const r = await run(ctx(stub.client), baseBody);
     expect(r.isOk()).toBe(true);

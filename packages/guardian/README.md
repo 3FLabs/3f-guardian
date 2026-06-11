@@ -43,6 +43,7 @@ import { Result } from "better-result";
 import { http, createPublicClient, type Hex, type PublicClient } from "viem";
 import { mainnet, base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
+import { z } from "zod";
 
 import {
   buildGuardianServer,
@@ -65,7 +66,7 @@ import {
   buildIntentRequestBindingChecks,
   buildIntentSwapChecks,
   buildRequestWhitelistingChecks,
-  type A1OnChainData,
+  zA1OnChainData,
   type IntentFundBindingPolicy,
   type IntentRequestBindingPolicy,
   type IntentSwapPolicy,
@@ -102,11 +103,13 @@ const TOKENS = new Map<string, TokenInfo>([
 ]);
 
 // 4. Caches: ERC-5267 domain (long TTL) + §A.1/§A.4 on-chain reads (short TTL).
-const eip712DomainCache = inMemoryCache<{ name: string; version: string }>({
+//    Each cache takes a schema (any Standard Schema — zod here) that
+//    re-validates every hit on read; a value that fails to parse is a miss.
+const eip712DomainCache = inMemoryCache(z.object({ name: z.string(), version: z.string() }), {
   defaultTtlMs: 24 * 60 * 60_000,
   maxEntries: 256,
 });
-const a1OnChainCache = inMemoryCache<A1OnChainData>({
+const a1OnChainCache = inMemoryCache(zA1OnChainData, {
   defaultTtlMs: 5 * 60_000,
   maxEntries: 1024,
 });

@@ -60,6 +60,7 @@ import { Result } from "better-result";
 import { http, createPublicClient, type Hex, type PublicClient } from "viem";
 import { mainnet, base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
+import { z } from "zod";
 
 import {
   buildGuardianServer,
@@ -82,7 +83,7 @@ import {
   buildIntentRequestBindingChecks,
   buildIntentSwapChecks,
   buildRequestWhitelistingChecks,
-  type A1OnChainData,
+  zA1OnChainData,
   type IntentFundBindingPolicy,
   type IntentRequestBindingPolicy,
   type IntentSwapPolicy,
@@ -140,12 +141,16 @@ const TOKENS = new Map<string, TokenInfo>([
 //
 // Two independent caches — see the "Cache" section below for the
 // rationale on splitting them. Sized for a small operator; bump
-// `maxEntries` for high-traffic deployments.
-const eip712DomainCache = inMemoryCache<{ name: string; version: string }>({
+// `maxEntries` for high-traffic deployments. The first argument is a
+// schema (any Standard Schema — zod, valibot, arktype) that every hit
+// is re-validated against on read; a value that fails to parse counts
+// as a miss, so a poisoned or stale-shaped entry can never reach the
+// checks.
+const eip712DomainCache = inMemoryCache(z.object({ name: z.string(), version: z.string() }), {
   defaultTtlMs: 24 * 60 * 60_000, // 24h — domains are immutable absent a contract upgrade
   maxEntries: 256,
 });
-const a1OnChainCache = inMemoryCache<A1OnChainData>({
+const a1OnChainCache = inMemoryCache(zA1OnChainData, {
   defaultTtlMs: 5 * 60_000, // 5min — Request roles change rarely but not never
   maxEntries: 1024,
 });
@@ -386,16 +391,25 @@ Two distinct cache surfaces — keep them separate so TTLs and eviction policies
 | EIP-712 domain | `{ name: string; version: string }` | `eip712Domain()` reads per `(chainId, verifyingContract)` — used by the `makeSign*` orchestrators in `@3flabs/guardian`. | 24h (immutable absent contract upgrade) |
 | §A.1 / §A.4 on-chain | `A1OnChainData` | Request-contract roles + factory linkage scanned by the §A.1 runner (also used by §A.4 per-contract). | 1–5 min |
 
-```ts
-import { inMemoryCache, type AsyncCache } from "@3flabs/guardian-defaults/cache";
-import type { A1OnChainData } from "@3flabs/guardian-defaults/checks";
+Every cache is constructed with a schema — any [Standard Schema](https://standardschema.dev)
+(zod ≥ 3.24 / v4, valibot ≥ 1.0, arktype ≥ 2.0, …) — and the value type is inferred from
+the schema's output. `get` re-validates each raw hit through the schema (`safeParse`-style,
+non-throwing); a stored value that fails to parse is reported as a **miss**, never returned,
+so a poisoned, truncated, or old-package-version entry in a shared store falls back to a
+fresh authoritative fetch. `zA1OnChainData` is exported from `./checks` so you don't have to
+hand-roll the §A.1 discriminated-union schema.
 
-const eip712DomainCache: AsyncCache<{ name: string; version: string }> = inMemoryCache({
+```ts
+import { z } from "zod";
+import { inMemoryCache, type AsyncCache } from "@3flabs/guardian-defaults/cache";
+import { zA1OnChainData, type A1OnChainData } from "@3flabs/guardian-defaults/checks";
+
+const eip712DomainCache = inMemoryCache(z.object({ name: z.string(), version: z.string() }), {
   defaultTtlMs: 24 * 60 * 60_000,
   maxEntries: 256,
 });
 
-const a1OnChainCache: AsyncCache<A1OnChainData> = inMemoryCache({
+const a1OnChainCache: AsyncCache<A1OnChainData> = inMemoryCache(zA1OnChainData, {
   defaultTtlMs: 5 * 60_000,
   maxEntries: 1024,
 });
@@ -413,9 +427,34 @@ const a1OnChainCache: AsyncCache<A1OnChainData> = inMemoryCache({
 var) instead of silently creating an immortal or instantly-expiring entry; callers already
 treat a throwing `set` as best-effort per the `AsyncCache` contract.
 
-`AsyncCache<V>` is a 3-method interface (`get`, `set`, `delete`). Implementations are free
-to back it with Redis / Memcached / KV; transport-backed adapters MUST handle their own
-serialisation (the in-memory cache stores by reference and side-steps serialisation entirely).
+`AsyncCache<V>` is an abstract class. The base class owns the validated read path (`get`);
+implementations subclass it and provide the raw storage primitives — a protected
+`rawGet(key): Promise<unknown>` (return `undefined` for miss/expired, no validation) plus
+`set` and `delete`. Back it with Redis / Memcached / KV freely; transport-backed adapters
+MUST handle their own serialisation and revive the domain shape (`Map` ↔ entries,
+`bigint` ↔ `string`) before `rawGet` returns, so the schema sees the same shape `set`
+received (the in-memory cache stores by reference and side-steps serialisation entirely):
+
+```ts
+import { AsyncCache } from "@3flabs/guardian-defaults/cache";
+import { zA1OnChainData, type A1OnChainData } from "@3flabs/guardian-defaults/checks";
+
+class RedisA1Cache extends AsyncCache<A1OnChainData> {
+  constructor(private readonly redis: RedisClient) {
+    super(zA1OnChainData);
+  }
+  protected async rawGet(key: string): Promise<unknown> {
+    const raw = await this.redis.get(key);
+    return raw === null ? undefined : reviveA1(JSON.parse(raw)); // Map/bigint revival
+  }
+  async set(key: string, value: A1OnChainData, options?: { ttlMs?: number }): Promise<void> {
+    await this.redis.set(key, serialiseA1(value), options?.ttlMs);
+  }
+  async delete(key: string): Promise<void> {
+    await this.redis.del(key);
+  }
+}
+```
 
 ## Checks
 
@@ -456,7 +495,8 @@ const signIntentSwap = makeSignIntentSwap({
 `makeSign*` reads each verifying contract's EIP-712 domain (`name`/`version`)
 via ERC-5267 `eip712Domain()` and hands the matching typed-data to
 `ctx.signTypedData`. Pass an optional `cache` (`AsyncCache<{ name; version }>`
-— `inMemoryCache` qualifies) to amortise the domain read across signing calls.
+— `inMemoryCache` constructed with a `{ name, version }` schema qualifies) to
+amortise the domain read across signing calls.
 
 For callers that need the raw building blocks, the four `build*TypedData`
 helpers (`buildIntentRequestBindingTypedData`, `buildIntentFundBindingTypedData`,
