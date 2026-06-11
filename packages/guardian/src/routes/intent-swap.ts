@@ -13,7 +13,7 @@ export function intentSwapRoute(abs: GuardianAbstractions) {
   const auth = makeAuthPlugin(abs);
   return new Elysia({ name: "guardian:route:intent-swap" }).use(auth("facility:intent-swaps")).post(
     "/v1/facility/intent-swaps",
-    ({ body, requestId, tokenInfo, logger }) =>
+    ({ body, requestId, tokenInfo, logger, request }) =>
       runSigning({
         abs,
         sign: abs.signIntentSwap,
@@ -21,6 +21,7 @@ export function intentSwapRoute(abs: GuardianAbstractions) {
         requestId,
         tokenInfo,
         logger,
+        requestSignal: request.signal,
       }),
     {
       // Documentation-only — see comment on intent-request-binding route.

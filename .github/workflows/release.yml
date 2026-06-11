@@ -28,6 +28,9 @@ jobs:
     needs: verify
     name: changesets version + publish
     runs-on: ubuntu-latest
+    # Build + version/publish completes in a few minutes; don't let a
+    # hung npm/API call hold the write-scoped token for 6 hours.
+    timeout-minutes: 30
     # OIDC trusted-publishing requires `id-token: write`. We also need
     # `contents: write` so the Changesets action can push the "Version Packages"
     # PR, and `pull-requests: write` so it can open / update that PR.

@@ -31,6 +31,29 @@ describe("inMemoryCache", () => {
     expect(await cache.get("k")).toBeUndefined();
   });
 
+  it("notifies onValidationFailure and purges the poisoned entry", async () => {
+    const failures: Array<{ key: string; issueCount: number }> = [];
+    const cache = inMemoryCache(z.number(), {
+      onValidationFailure: (key, issues) => failures.push({ key, issueCount: issues.length }),
+    });
+    await cache.set("good", 1);
+    await cache.set("bad", "poison" as unknown as number);
+
+    expect(await cache.get("bad")).toBeUndefined();
+    expect(failures).toEqual([{ key: "bad", issueCount: 1 }]);
+
+    // The poisoned entry was deleted on the failed read: a subsequent
+    // read is a plain miss and does NOT re-notify (it never reaches
+    // validation), so operators see one event per poisoning, not one
+    // per request.
+    expect(await cache.get("bad")).toBeUndefined();
+    expect(failures).toHaveLength(1);
+
+    // Valid entries are untouched and never notify.
+    expect(await cache.get("good")).toBe(1);
+    expect(failures).toHaveLength(1);
+  });
+
   it("returns undefined after the per-call ttlMs expires", async () => {
     let now = 1_000_000;
     const cache = inMemoryCache(z.string(), { now: () => now });
@@ -188,6 +211,27 @@ describe("AsyncCache (abstract base)", () => {
     // Simulate a poisoned / legacy-version entry already in the store.
     cache.store.set("k", JSON.stringify({ owner: 42, wrong: true }));
     expect(await cache.get("k")).toBeUndefined();
+    // The failed read best-effort purges the poisoned entry so it
+    // doesn't keep nullifying the cache until its TTL expires.
+    expect(cache.store.has("k")).toBe(false);
+  });
+
+  it("swallows a throwing delete during the validation-failure purge", async () => {
+    class StubbornCache extends AsyncCache<number> {
+      constructor() {
+        super(z.number());
+      }
+      protected override async rawGet(): Promise<unknown> {
+        return "poison";
+      }
+      override async set(): Promise<void> {}
+      override async delete(): Promise<void> {
+        throw new Error("transport down");
+      }
+    }
+    // The purge is best-effort: a flaky transport must not turn a safe
+    // miss into a thrown error.
+    expect(await new StubbornCache().get("k")).toBeUndefined();
   });
 
   it("supports a schema whose ~standard.validate is asynchronous", async () => {

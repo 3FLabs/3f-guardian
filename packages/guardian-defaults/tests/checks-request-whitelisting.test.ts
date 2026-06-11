@@ -380,6 +380,15 @@ describe("buildRequestWhitelistingChecks", () => {
       const checks = (r.error as ValidationFailedError).checks;
       const failed = checks.filter((c) => !c.passed && c.description.endsWith(`(for ${RC2})`));
       expect(failed.length).toBeGreaterThan(0);
+      // The per-contract §A.1 deadline entries are dropped on BOTH the
+      // success and the failure path: the wire carries exactly one
+      // request-wide deadline check, never a per-contract-suffixed
+      // duplicate.
+      const deadlineEntries = checks.filter((c) => c.description.includes("deadline within"));
+      expect(deadlineEntries).toHaveLength(1);
+      expect(deadlineEntries[0]!.description).toBe(
+        "deadline within MAX_DEADLINE_SECONDS_AHEAD of now",
+      );
     }
   });
 

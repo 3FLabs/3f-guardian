@@ -1,10 +1,12 @@
 export type { CheckRunner, CheckRunnerError } from "./types.js";
 
 export {
+  bpsToleranceWithWeiFloor,
   checkDeadline,
   checkMembership,
   checkNonceWindow,
   checkSwapPriceTolerance,
+  DEADLINE_CHECK_DESCRIPTION,
   failed,
   passed,
   rollUp,

@@ -49,13 +49,21 @@ export const DEFAULT_GUARDIAN_TIMEOUTS = {
 export type ResolvedGuardianTimeouts = Required<GuardianTimeouts>;
 
 /**
+ * Largest delay `setTimeout` represents faithfully (2³¹ − 1 ms ≈ 24.8
+ * days). Above this, Bun/Node overflow the signed 32-bit timer value
+ * and fire (almost) immediately.
+ */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/**
  * Merge host overrides over {@link DEFAULT_GUARDIAN_TIMEOUTS}.
  *
  * Overrides are validated loudly: `setTimeout` clamps NaN / 0 / negative
- * delays to 0, so a misconfigured deadline would time every abstraction
- * call out instantly and turn the whole service into 503s. Rejecting at
- * construction matches the `inMemoryRateLimiter` / `inMemoryCache`
- * semantics in guardian-defaults.
+ * delays to 0 AND wraps delays above 2³¹ − 1 ms around to ~1 ms, so a
+ * misconfigured deadline in either direction would time every
+ * abstraction call out instantly and turn the whole service into 503s.
+ * Rejecting at construction matches the `inMemoryRateLimiter` /
+ * `inMemoryCache` semantics in guardian-defaults.
  */
 export function resolveGuardianTimeouts(overrides?: GuardianTimeouts): ResolvedGuardianTimeouts {
   const resolved: { -readonly [K in keyof ResolvedGuardianTimeouts]: number } = {
@@ -64,9 +72,10 @@ export function resolveGuardianTimeouts(overrides?: GuardianTimeouts): ResolvedG
   for (const key of Object.keys(DEFAULT_GUARDIAN_TIMEOUTS) as (keyof ResolvedGuardianTimeouts)[]) {
     const value = overrides?.[key];
     if (value === undefined) continue;
-    if (!Number.isFinite(value) || value <= 0) {
+    if (!Number.isFinite(value) || value <= 0 || value > MAX_TIMEOUT_MS) {
       throw new TypeError(
-        `guardian: timeouts.${key} must be a positive finite number, got ${value}`,
+        `guardian: timeouts.${key} must be a positive number of at most ` +
+          `${MAX_TIMEOUT_MS}ms (setTimeout's 2^31-1 limit), got ${value}`,
       );
     }
     resolved[key] = value;
@@ -95,7 +104,10 @@ export async function withAbstractionDeadline<T>(
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      logger.error({ abstraction, timeoutMs: ms }, "guardian: host abstraction timed out");
+      // Abort + reject BEFORE logging: a host logger that throws must
+      // not be able to skip the deadline's actual effect, and the
+      // logging failure itself must not escape a timer callback (an
+      // uncaught throw there takes the process down).
       controller.abort(new Error(`guardian: ${abstraction} timed out after ${ms}ms`));
       reject(
         new UpstreamUnavailableError({
@@ -103,6 +115,11 @@ export async function withAbstractionDeadline<T>(
           status: 503,
         }),
       );
+      try {
+        logger.error({ abstraction, timeoutMs: ms }, "guardian: host abstraction timed out");
+      } catch {
+        // Swallow: the timeout already took effect above.
+      }
     }, ms);
   });
   // The async IIFE normalises a synchronous throw from the host

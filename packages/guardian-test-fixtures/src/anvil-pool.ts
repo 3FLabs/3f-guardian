@@ -53,6 +53,12 @@ export async function startAnvilPool(opts?: { port?: number; limit?: number }): 
     server.once("error", onError);
     server.listen(opts?.port ?? 0, "127.0.0.1", () => {
       server.removeListener("error", onError);
+      // Keep a listener attached for the server's lifetime: a post-bind
+      // 'error' event with no listener is an uncaught exception that
+      // kills the whole vitest process instead of failing one test.
+      server.on("error", (error: Error) => {
+        console.error("[anvil-pool] server error after bind:", error);
+      });
       resolve();
     });
   });

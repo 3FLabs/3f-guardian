@@ -28,8 +28,16 @@ export async function runSigning<TBody extends { chainId: number }, TSuccess, TE
   requestId: string;
   tokenInfo: TokenInfo;
   logger: Logger;
+  /**
+   * The HTTP request's own abort signal (fires on client disconnect).
+   * Joined with the `signMs` deadline signal so a disconnected client's
+   * on-chain/KMS work stops at the next cancellation point instead of
+   * running to the full budget — every client retry would otherwise
+   * stack another full concurrent validate-and-sign.
+   */
+  requestSignal?: AbortSignal;
 }): Promise<TSuccess> {
-  const { abs, sign, body, requestId, tokenInfo, logger } = args;
+  const { abs, sign, body, requestId, tokenInfo, logger, requestSignal } = args;
   if (abs.probeUpstream) unwrapOrThrow(abs.probeUpstream());
   const client = unwrapOrThrow(abs.getChainClient(body.chainId));
   const timeouts = resolveGuardianTimeouts(abs.timeouts);
@@ -44,7 +52,7 @@ export async function runSigning<TBody extends { chainId: number }, TSuccess, TE
         now: new Date(),
         signTypedData: abs.signTypedData,
         logger: signLogger,
-        signal,
+        signal: requestSignal !== undefined ? AbortSignal.any([signal, requestSignal]) : signal,
       };
       return sign(ctx, body);
     },

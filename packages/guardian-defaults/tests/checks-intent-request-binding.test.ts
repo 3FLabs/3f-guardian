@@ -1049,6 +1049,62 @@ describe("buildIntentRequestBindingChecks", () => {
     expect(r.isOk()).toBe(true);
     expect(stub.multicalls.length).toBe(1);
   });
+
+  it("resolves when two accepted factories both claim the contract and the SECOND emitted the deployment", async () => {
+    // Factory-migration scenario: old + new factory are both accepted
+    // and both answer isRequest=true (e.g. the new factory's registry
+    // proxies the old one). The deployment event lives on the second
+    // hit — scanning only factoryHits[0] would miss it, silently
+    // degrade to tooOld (role checks skipped under the default
+    // disposition), and cache the wrong outcome.
+    const twoFactoryPolicy: IntentRequestBindingPolicy = {
+      ...policy,
+      acceptedRequestFactories: new Map([[1, new Set<string>([FACTORY, OTHER_FACTORY])]]),
+    };
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true, true]], // owner + both isRequest=true
+      latestBlock: 5_500n,
+      getLogs: ({ fromBlock, toBlock }) =>
+        fromBlock !== undefined && fromBlock <= 5_000n && toBlock! >= 5_000n
+          ? [
+              {
+                address: OTHER_FACTORY,
+                eventName: "RequestCreated",
+                blockNumber: 5_000n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 1,
+                args: { user: PULLER, roles: ROLE_PULLER },
+              },
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 2,
+                args: { user: CONSUMER, roles: ROLE_CONSUMER },
+              },
+            ]
+          : [],
+    });
+    const cache = inMemoryCache(zA1OnChainData);
+    const run = buildIntentRequestBindingChecks({ policy: twoFactoryPolicy, cache });
+    const r = await run(ctx(stub.client), baseBody);
+    expect(r.isOk()).toBe(true);
+    if (r.isOk()) {
+      // Fully resolved: every role check evaluated, nothing skipped.
+      expect(r.value.every((c) => c.skipped !== true)).toBe(true);
+    }
+    // The cached entry is attributed to the factory that actually
+    // emitted the deployment event, not blindly to the first hit.
+    const entry = await cache.get(`1:${RC.toLowerCase()}`);
+    expect(entry?.kind).toBe("resolved");
+    if (entry?.kind === "resolved") expect(entry.factory).toBe(OTHER_FACTORY);
+  });
 });
 
 describe("scanRoleHolders", () => {
@@ -1073,7 +1129,7 @@ describe("scanRoleHolders", () => {
     const { client, spans } = recordingClient();
     const outcome = await scanRoleHolders({
       client,
-      factory: FACTORY,
+      factories: [FACTORY],
       requestContract: RC,
       latestBlock: 10_000n,
       blockRange: 1_000n,
@@ -1109,7 +1165,7 @@ describe("scanRoleHolders", () => {
     } as unknown as PublicClient;
     const outcome = await scanRoleHolders({
       client,
-      factory: FACTORY,
+      factories: [FACTORY],
       requestContract: RC,
       latestBlock: 10_000n,
       blockRange: 1_000n,
@@ -1157,7 +1213,7 @@ describe("scanRoleHolders", () => {
     } as unknown as PublicClient;
     const outcome = await scanRoleHolders({
       client,
-      factory: FACTORY,
+      factories: [FACTORY],
       requestContract: RC,
       latestBlock: 5_500n,
       blockRange: 1_000n,
@@ -1191,7 +1247,7 @@ describe("scanRoleHolders", () => {
     } as unknown as PublicClient;
     const outcome = await scanRoleHolders({
       client,
-      factory: FACTORY,
+      factories: [FACTORY],
       requestContract: RC,
       latestBlock: 10_000n,
       blockRange: 1_000n,
@@ -1200,6 +1256,82 @@ describe("scanRoleHolders", () => {
     // Deployment never confirmed — the scan must exhaust the lookback
     // and report tooOld, not a trusted-complete "resolved".
     expect(outcome.kind).toBe("tooOld");
+  });
+
+  it("accepts the deployment event from any of the matched factories", async () => {
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        fromBlock <= 5_000n && toBlock >= 5_000n
+          ? [
+              {
+                address: OTHER_FACTORY,
+                eventName: "RequestCreated",
+                blockNumber: 5_000n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+            ]
+          : [],
+    } as unknown as PublicClient;
+    const outcome = await scanRoleHolders({
+      client,
+      factories: [FACTORY, OTHER_FACTORY],
+      requestContract: RC,
+      latestBlock: 5_500n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    expect(outcome.kind).toBe("resolved");
+    if (outcome.kind === "resolved") {
+      expect(outcome.deploymentBlock).toBe(5_000n);
+      expect(outcome.deploymentFactory).toBe(OTHER_FACTORY);
+    }
+  });
+
+  it("replays same-block events in logIndex order (grant then revoke in one block)", async () => {
+    // The stub returns the logs in REVERSE order; only (block, logIndex)
+    // sorting — not array order — makes the revoke win.
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        fromBlock <= 5_000n && toBlock >= 5_000n
+          ? [
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 2,
+                args: { user: PULLER, roles: 0n }, // revoke (post-update bitfield)
+              },
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 1,
+                args: { user: PULLER, roles: ROLE_PULLER }, // grant
+              },
+              {
+                address: FACTORY,
+                eventName: "RequestCreated",
+                blockNumber: 5_000n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+            ]
+          : [],
+    } as unknown as PublicClient;
+    const outcome = await scanRoleHolders({
+      client,
+      factories: [FACTORY],
+      requestContract: RC,
+      latestBlock: 5_500n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    expect(outcome.kind).toBe("resolved");
+    if (outcome.kind === "resolved") {
+      // Grant at logIndex 1, revoke at logIndex 2 — final state empty.
+      expect(outcome.holders.size).toBe(0);
+    }
   });
 
   it("throws once the wall-clock budget is exhausted between chunks", async () => {
@@ -1212,7 +1344,7 @@ describe("scanRoleHolders", () => {
     await expect(
       scanRoleHolders({
         client,
-        factory: FACTORY,
+        factories: [FACTORY],
         requestContract: RC,
         latestBlock: 10_000n,
         blockRange: 1_000n,
@@ -1229,7 +1361,7 @@ describe("scanRoleHolders", () => {
     await expect(
       scanRoleHolders({
         client,
-        factory: FACTORY,
+        factories: [FACTORY],
         requestContract: RC,
         latestBlock: 10_000n,
         blockRange: 1_000n,

@@ -47,6 +47,10 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
  *  - `eventScanBlockRange` — chunk size for `getLogs`. Larger = fewer
  *    RPC round-trips, but more risk of provider range limits. 10_000
  *    is a sane default for most providers (Alchemy / Infura allow this).
+ *    Pick a range your provider answers COMPLETELY: a provider that
+ *    silently truncates oversized `getLogs` responses (instead of
+ *    erroring) can hide the `RequestCreated` deployment marker and
+ *    degrade every scan to `tooOld`.
  *
  *  - `eventScanMaxLookbackBlocks` — how far back the scan walks before
  *    giving up. If the contract was deployed earlier than
@@ -208,12 +212,13 @@ export type A1Deps = {
  * If no factory returns `true`, every on-chain entry is emitted as
  * `skipped:true` and the request fails on check #1 alone.
  *
- * Stage 2 — role-events scan against the matched factory:
- *   - Walks backwards in `eventScanBlockRange` chunks until the
+ * Stage 2 — role-events scan against every matched factory (usually
+ * one; multiple during a factory migration):
+ *   - Walks backwards in `eventScanBlockRange` chunks until a matched
  *     factory's `RequestCreated` event for `requestContract` is found
  *     OR `eventScanMaxLookbackBlocks` is exhausted.
  *   - Each chunk is one `getLogs` filtered server-side to
- *     `[factory, requestContract]` × `[RolesUpdated, RequestCreated]`.
+ *     `[factories…, requestContract]` × `[RolesUpdated, RequestCreated]`.
  *   - "Too old" outcome → role checks fail (422) if a rogue grant was
  *     observed inside the scanned window, otherwise follow the
  *     policy's `onLookbackExhausted` disposition (default: skipped).
@@ -443,9 +448,21 @@ async function fetchA1OnChain(
     return Result.ok({ kind: "noFactory" });
   }
 
-  // Pick the (sole) factory that returned true. If multiple did
-  // (configuration error), pick the first deterministically.
-  const factory = factoryHits[0]!;
+  // Usually exactly one factory claims the contract. Multiple hits are
+  // possible during a factory migration (e.g. the new factory's
+  // registry proxies the old one for back-compat): the scan below must
+  // accept the deployment event from ANY of them — pinning the first
+  // hit would miss the real RequestCreated and silently degrade the
+  // outcome to `tooOld` (role checks skipped under the default
+  // disposition, and the wrong answer cached). Still operator-notable,
+  // so log it.
+  if (factoryHits.length > 1) {
+    ctx.logger.error(
+      { factories: factoryHits, requestContract },
+      "A.1: multiple accepted factories claim this contract; " +
+        "scanning deployment against all of them — check the acceptedRequestFactories configuration",
+    );
+  }
 
   // ── Stage 2: role-events scan ────────────────────────────────────
   let latestBlock: bigint;
@@ -472,7 +489,7 @@ async function fetchA1OnChain(
   try {
     scanOutcome = await scanRoleHolders({
       client: ctx.client,
-      factory,
+      factories: factoryHits,
       requestContract,
       latestBlock,
       blockRange: policy.eventScanBlockRange,
@@ -486,7 +503,7 @@ async function fetchA1OnChain(
     });
   } catch (e) {
     ctx.logger.error(
-      { err: sanitizeErr(e), requestContract, factory },
+      { err: sanitizeErr(e), requestContract, factories: factoryHits },
       "A.1: role-events scan failed",
     );
     return Result.err(
@@ -498,14 +515,25 @@ async function fetchA1OnChain(
   }
 
   if (scanOutcome.kind === "tooOld") {
+    // No deployment event observed, so attribute the entry to the first
+    // hit deterministically — `evaluateA1` only uses the field to check
+    // that the factory is still on the live policy.
     return Result.ok({
       kind: "tooOld",
-      factory,
+      factory: factoryHits[0]!,
       owner,
       partialHolders: scanOutcome.partialHolders,
     });
   }
-  return Result.ok({ kind: "resolved", factory, owner, holders: scanOutcome.holders });
+  return Result.ok({
+    kind: "resolved",
+    // Prefer the factory that actually emitted the RequestCreated event;
+    // fall back to the first hit when the scan resolved by reaching
+    // block 0 without observing it.
+    factory: scanOutcome.deploymentFactory ?? factoryHits[0]!,
+    owner,
+    holders: scanOutcome.holders,
+  });
 }
 
 /**

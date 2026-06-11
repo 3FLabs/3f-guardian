@@ -15,7 +15,11 @@ export const contentTypePlugin = new Elysia({ name: "guardian:content-type" })
   .onRequest((ctx) => {
     if (ctx.request.method !== "POST" && ctx.request.method !== "PUT") return;
     const ct = ctx.request.headers.get("content-type") ?? "";
-    if (!ct.toLowerCase().startsWith("application/json")) {
+    // Compare the MEDIA TYPE (everything before the first ";"), not a
+    // prefix: `startsWith` would also admit e.g. `application/jsonx`.
+    // Parameters (charset=utf-8, ...) are accepted and ignored.
+    const mediaType = ct.split(";", 1)[0]!.trim().toLowerCase();
+    if (mediaType !== "application/json") {
       throw new UnsupportedMediaTypeError({
         message: "Content-Type MUST be application/json (§6.1).",
       });

@@ -21,7 +21,7 @@ export function intentFundBindingRoute(abs: GuardianAbstractions) {
     .use(auth("facility:intent-fund-bindings"))
     .post(
       "/v1/facility/intent-fund-bindings",
-      ({ body, requestId, tokenInfo, logger }) =>
+      ({ body, requestId, tokenInfo, logger, request }) =>
         runSigning({
           abs,
           sign: abs.signIntentFundBinding,
@@ -29,6 +29,7 @@ export function intentFundBindingRoute(abs: GuardianAbstractions) {
           requestId,
           tokenInfo,
           logger,
+          requestSignal: request.signal,
         }),
       {
         // Documentation-only — see comment on intent-request-binding route.

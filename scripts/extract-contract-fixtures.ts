@@ -45,8 +45,10 @@ type Source = {
 };
 
 const REPO_ROOTS = {
-  grunt: Bun.env.GRUNT_REPO_ROOT ?? resolve(REPO_ROOT, "../grunt"),
-  whitelist: Bun.env.WHITELIST_REPO_ROOT ?? resolve(REPO_ROOT, "../3f-request-whitelist"),
+  // `||` not `??`: an env var set to the empty string must fall back to
+  // the sibling default instead of resolving cwd-relative paths.
+  grunt: Bun.env.GRUNT_REPO_ROOT || resolve(REPO_ROOT, "../grunt"),
+  whitelist: Bun.env.WHITELIST_REPO_ROOT || resolve(REPO_ROOT, "../3f-request-whitelist"),
   local: resolve(REPO_ROOT, "packages/guardian-test-fixtures/contracts"),
 } as const;
 
@@ -138,12 +140,12 @@ type StampedArtifact = {
  * sources; `markDirty` is uniform within a run, so caching is safe).
  *
  * With `markDirty` (extract mode only), a dirty worktree gets a
- * `-dirty` suffix, mirroring `git describe --dirty`. `--check` treats a
- * BUNDLED `-dirty` stamp as a hard failure (see `runCheck`): the
- * marker exists so locally-extracted experiments can never silently
- * graduate into committed fixtures. Check mode itself never appends
- * the marker, so the monorepo's own dirtiness cannot produce false
- * drift.
+ * `-dirty` suffix, mirroring `git describe --dirty`. `--check` treats
+ * any BUNDLED stamp that is not a full 40-hex commit hash (`-dirty`,
+ * `no-git`, truncated) as a hard failure (see `runCheck`): the markers
+ * exist so locally-extracted experiments can never silently graduate
+ * into committed fixtures. Check mode itself never appends the marker,
+ * so the monorepo's own dirtiness cannot produce false drift.
  */
 const gitHeadCache = new Map<string, string>();
 function gitHead(repoPath: string, opts: { markDirty: boolean }): string {
@@ -318,17 +320,20 @@ async function runCheck(): Promise<void> {
       failures++;
       continue;
     }
-    // A bundled `-dirty` stamp means the artifact was extracted from an
-    // uncommitted worktree — its content is unreproducible from any
-    // commit. The commit-mismatch path below routes dirty-vs-clean to a
-    // NOTICE (not drift), so without this hard failure a dirty artifact
-    // would pass `fixtures:check` forever. Dirty extraction is for
-    // local iteration only; committed artifacts must come from a clean
-    // checkout at the pinned tag.
-    if (artifact.sourceCommitHash.endsWith("-dirty")) {
+    // A bundled stamp that is not a full 40-hex commit hash means the
+    // artifact's content is unreproducible from any commit: `-dirty`
+    // (uncommitted worktree) and `no-git` (extraction from a non-git
+    // source root) both fall out of this, as does any truncated or
+    // hand-edited stamp. The commit-mismatch path below routes such
+    // stamps to a NOTICE (not drift), so without this hard failure an
+    // unreproducible artifact would pass `fixtures:check` forever.
+    // Dirty/no-git extraction is for local iteration only; committed
+    // artifacts must come from a clean checkout at the pinned tag.
+    if (!/^[0-9a-f]{40}$/.test(artifact.sourceCommitHash)) {
       console.error(
-        `[fixtures] INVALID: ${src.name} was extracted from a dirty worktree ` +
-          `(${artifact.sourceCommitHash}) — re-extract from a clean checkout at the pinned tag`,
+        `[fixtures] INVALID: ${src.name} has an unreproducible provenance stamp ` +
+          `("${artifact.sourceCommitHash}" is not a full commit hash) — ` +
+          `re-extract from a clean checkout at the pinned tag`,
       );
       failures++;
       continue;

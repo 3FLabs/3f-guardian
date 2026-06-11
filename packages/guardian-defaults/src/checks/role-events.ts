@@ -38,6 +38,12 @@ export type RoleScanOutcome =
       readonly kind: "resolved";
       readonly holders: ReadonlyMap<Address, bigint>;
       readonly deploymentBlock: bigint;
+      /**
+       * The accepted factory that emitted the matched `RequestCreated`
+       * event. `undefined` when the scan resolved by reaching block 0
+       * without observing the deployment event.
+       */
+      readonly deploymentFactory?: Address;
     }
   | { readonly kind: "tooOld"; readonly partialHolders: ReadonlyMap<Address, bigint> };
 
@@ -51,20 +57,27 @@ type ChunkLog = {
 /**
  * Walks the chain backwards in chunks of `blockRange` blocks, gathering
  * `RolesUpdated` events on `requestContract` and `RequestCreated`
- * events on `factory`. Stops as soon as the deployment event for this
- * `requestContract` is observed, or when `maxLookbackBlocks` worth of
- * history has been scanned (whichever comes first).
+ * events on any of `factories`. Stops as soon as the deployment event
+ * for this `requestContract` is observed, or when `maxLookbackBlocks`
+ * worth of history has been scanned (whichever comes first).
+ *
+ * `factories` is every accepted factory whose `isRequest()` claimed the
+ * contract — usually one, but during a factory migration (or with a
+ * back-compat registry proxy) more than one can answer `true`, and
+ * scanning only the first would miss the real `RequestCreated` and
+ * silently degrade the outcome to `tooOld`.
  *
  * Each chunk is a single `eth_getLogs` call with `address` restricted
- * to `[factory, requestContract]` and `topics[0]` filtered server-side
- * to the two event signatures via viem's typed `events` API. The
- * factory's `RequestCreated` event does not index `request`, so the
- * deployment match is decided client-side after viem decodes the args.
- * Every decoded log is additionally attributed to its emitting address
- * client-side: only `RolesUpdated` emitted by `requestContract` enters
- * the replay, and only `RequestCreated` emitted by `factory` can mark
- * the deployment — the OR-of-addresses wire filter alone would let a
- * factory-emitted `RolesUpdated` pollute the holder map.
+ * to `[...factories, requestContract]` and `topics[0]` filtered
+ * server-side to the two event signatures via viem's typed `events`
+ * API. The factory's `RequestCreated` event does not index `request`,
+ * so the deployment match is decided client-side after viem decodes
+ * the args. Every decoded log is additionally attributed to its
+ * emitting address client-side: only `RolesUpdated` emitted by
+ * `requestContract` enters the replay, and only `RequestCreated`
+ * emitted by one of `factories` can mark the deployment — the
+ * OR-of-addresses wire filter alone would let a factory-emitted
+ * `RolesUpdated` pollute the holder map.
  *
  * Replays role state by setting `state[user] = roles` for every
  * `RolesUpdated` log, in increasing (block, logIndex) order — solady
@@ -86,7 +99,7 @@ type ChunkLog = {
  */
 export async function scanRoleHolders(args: {
   readonly client: PublicClient;
-  readonly factory: Address;
+  readonly factories: readonly Address[];
   readonly requestContract: Address;
   readonly latestBlock: bigint;
   readonly blockRange: bigint;
@@ -95,9 +108,10 @@ export async function scanRoleHolders(args: {
   readonly signal?: AbortSignal;
   readonly now?: () => number;
 }): Promise<RoleScanOutcome> {
-  const { client, factory, requestContract, latestBlock, blockRange, maxLookbackBlocks } = args;
+  const { client, factories, requestContract, latestBlock, blockRange, maxLookbackBlocks } = args;
   const now = args.now ?? Date.now;
 
+  if (factories.length === 0) throw new Error("factories must be non-empty");
   if (blockRange <= 0n) throw new Error("blockRange must be positive");
   if (maxLookbackBlocks <= 0n) throw new Error("maxLookbackBlocks must be positive");
   if (args.deadlineMs !== undefined && (!Number.isFinite(args.deadlineMs) || args.deadlineMs < 0)) {
@@ -107,13 +121,14 @@ export async function scanRoleHolders(args: {
   const earliestAllowed = latestBlock > maxLookbackBlocks ? latestBlock - maxLookbackBlocks : 0n;
 
   const requestContractLower = requestContract.toLowerCase();
-  const factoryLower = factory.toLowerCase();
+  const factoryByLower = new Map(factories.map((f) => [f.toLowerCase(), f]));
 
   const allLogs: ChunkLog[] = [];
 
   const startedAt = now();
   let toBlock = latestBlock;
   let foundDeploymentBlock: bigint | undefined;
+  let deploymentFactory: Address | undefined;
   let firstChunk = true;
 
   // Walk backwards. Each iteration scans [fromBlock, toBlock] inclusive.
@@ -139,7 +154,7 @@ export async function scanRoleHolders(args: {
 
     // oxlint-disable-next-line no-await-in-loop
     const logs = await client.getLogs({
-      address: [factory, requestContract],
+      address: [...factories, requestContract],
       events: [rolesUpdatedEvent, requestCreatedEvent],
       fromBlock,
       toBlock,
@@ -147,21 +162,23 @@ export async function scanRoleHolders(args: {
 
     for (const log of logs) {
       // Attribute every event to its EMITTER. The single getLogs call
-      // filters `address ∈ {factory, requestContract}` × both topics,
-      // so a `RolesUpdated` emitted by the FACTORY (solady OwnableRoles
-      // factories emit the same event for their own roles) arrives in
-      // the same batch as the request contract's. Replaying it into the
-      // request contract's holder map would be fail-open: a
+      // filters `address ∈ {factories…, requestContract}` × both
+      // topics, so a `RolesUpdated` emitted by a FACTORY (solady
+      // OwnableRoles factories emit the same event for their own roles)
+      // arrives in the same batch as the request contract's. Replaying
+      // it into the request contract's holder map would be fail-open: a
       // factory-level grant with an overlapping role bit could mask an
       // empty request-contract holder set into a pass. Likewise a
-      // `RequestCreated` not emitted by THIS factory must never count
-      // as the deployment marker.
+      // `RequestCreated` not emitted by one of the matched factories
+      // must never count as the deployment marker.
       const emitter = log.address.toLowerCase();
       if (log.eventName === "RequestCreated") {
-        if (emitter !== factoryLower) continue;
+        const emittingFactory = factoryByLower.get(emitter);
+        if (emittingFactory === undefined) continue;
         const created = log.args.request;
         if (created && created.toLowerCase() === requestContractLower) {
           foundDeploymentBlock = log.blockNumber;
+          deploymentFactory = emittingFactory;
         }
         continue;
       }
@@ -194,6 +211,7 @@ export async function scanRoleHolders(args: {
     // If we never observed a RequestCreated event but earliestAllowed
     // is 0n, treat the genesis block as the deployment lower bound.
     deploymentBlock: foundDeploymentBlock ?? 0n,
+    deploymentFactory,
   };
 }
 

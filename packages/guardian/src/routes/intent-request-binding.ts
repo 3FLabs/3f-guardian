@@ -15,7 +15,7 @@ export function intentRequestBindingRoute(abs: GuardianAbstractions) {
     .use(auth("facility:intent-request-bindings"))
     .post(
       "/v1/facility/intent-request-bindings",
-      ({ body, requestId, tokenInfo, logger }) =>
+      ({ body, requestId, tokenInfo, logger, request }) =>
         runSigning({
           abs,
           sign: abs.signIntentRequestBinding,
@@ -23,6 +23,7 @@ export function intentRequestBindingRoute(abs: GuardianAbstractions) {
           requestId,
           tokenInfo,
           logger,
+          requestSignal: request.signal,
         }),
       {
         // `parse: "json"` is documentation-only: the global rawBodyPlugin's

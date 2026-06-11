@@ -25,7 +25,7 @@ export function requestWhitelistingRoute(abs: GuardianAbstractions) {
     .use(auth("whitelist-book:request-whitelistings"))
     .post(
       "/v1/whitelist-book/request-whitelistings",
-      ({ body, requestId, tokenInfo, logger }) =>
+      ({ body, requestId, tokenInfo, logger, request }) =>
         runSigning({
           abs,
           sign: abs.signRequestWhitelisting,
@@ -33,6 +33,7 @@ export function requestWhitelistingRoute(abs: GuardianAbstractions) {
           requestId,
           tokenInfo,
           logger,
+          requestSignal: request.signal,
         }),
       {
         // Documentation-only — see comment on intent-request-binding route.

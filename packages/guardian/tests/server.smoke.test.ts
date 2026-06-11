@@ -161,6 +161,13 @@ describe("Guardian server smoke", () => {
     expect(body.signature).toBe("0x" + "a".repeat(130));
   });
 
+  it("rejects an application/json-prefixed but different media type with 415", async () => {
+    // The gate must compare the media type, not a string prefix —
+    // `application/jsonx` is NOT application/json.
+    const res = await app.handle(postBinding({ headers: { "content-type": "application/jsonx" } }));
+    expect(res.status).toBe(415);
+  });
+
   it("echoes a caller-supplied X-Request-Id when canonical", async () => {
     const id = "550e8400-e29b-41d4-a716-446655440000";
     const res = await app.handle(
@@ -361,13 +368,19 @@ describe("construction-time validation", () => {
     },
   );
 
-  it("rejects NaN / non-positive timeout overrides loudly at construction", () => {
+  it("rejects NaN / non-positive / setTimeout-overflowing timeout overrides loudly at construction", () => {
     expect(() =>
       buildGuardianServer(stubAbstractions({ timeouts: { authenticateMs: Number.NaN } })),
-    ).toThrow(/timeouts\.authenticateMs must be a positive finite number/);
+    ).toThrow(/timeouts\.authenticateMs must be a positive number/);
     expect(() => buildGuardianServer(stubAbstractions({ timeouts: { signMs: 0 } }))).toThrow(
-      /timeouts\.signMs must be a positive finite number/,
+      /timeouts\.signMs must be a positive number/,
     );
+    // 30 days > 2^31−1 ms: setTimeout would wrap it to ~1 ms and turn
+    // every request into an instant 503 — the exact misconfiguration
+    // the validation exists to catch.
+    expect(() =>
+      buildGuardianServer(stubAbstractions({ timeouts: { signMs: 30 * 24 * 60 * 60 * 1000 } })),
+    ).toThrow(/at most 2147483647ms/);
   });
 });
 
@@ -418,6 +431,53 @@ describe("body size cap", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
     expect(res.headers.get("X-Request-Id")).toBe(body.requestId);
+  });
+
+  it("rejects a CHUNKED body that crosses the cap mid-stream with 413", async () => {
+    let authCalls = 0;
+    const app = buildGuardianServer(
+      stubAbstractions({
+        authenticate: async () => {
+          authCalls++;
+          return Result.err(new UnauthenticatedError({ message: "nope" }));
+        },
+        maxBodyBytes: 256,
+      }),
+    );
+    // No Content-Length header is sent for a stream body, so the
+    // declared-length fast path can't fire — the 413 must come from
+    // readBodyCapped's multi-chunk branch counting bytes as they
+    // arrive and cancelling the reader at the cap.
+    const bytes = new TextEncoder().encode(JSON.stringify({ pad: "x".repeat(600) }));
+    let delivered = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (delivered >= bytes.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(bytes.slice(delivered, delivered + 64));
+        delivered += 64;
+      },
+    });
+    const res = await app.handle(
+      new Request("http://localhost/v1/facility/intent-request-bindings", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer valid",
+          ...CLIENT_HEADERS,
+        },
+        body: stream,
+        duplex: "half",
+      } as RequestInit),
+    );
+    expect(res.status).toBe(413);
+    expect(authCalls).toBe(0);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("bad_request");
+    // reader.cancel() fired at the cap: the stream was never drained.
+    expect(delivered).toBeLessThan(bytes.length);
   });
 
   it("does not apply the cap to host routes whose content types guardian never buffers", async () => {
@@ -703,5 +763,102 @@ describe("HMAC-flagged tokens end-to-end (§5.4)", () => {
       }),
     );
     expect(res.status).toBe(401);
+    // RFC 9110 §11.6.1 — every 401 names the auth scheme.
+    expect(res.headers.get("WWW-Authenticate")).toContain("Bearer");
+  });
+
+  it("rejects a timestamp outside the ±60s tolerance with 401", async () => {
+    const ts = String(Math.floor(Date.now() / 1000) - 120);
+    const headers = {
+      ...signedHeaders(BODY),
+      "x-guardian-timestamp": ts,
+      // Correctly signed for the stale timestamp — only the skew fails.
+      "x-guardian-signature": computeBodyHmacHex(SECRET, ts, new TextEncoder().encode(BODY)),
+    };
+    const res = await app.handle(
+      new Request("http://localhost/v1/facility/intent-request-bindings", {
+        method: "POST",
+        headers,
+        body: BODY,
+      }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a non-decimal timestamp with 401", async () => {
+    const headers = { ...signedHeaders(BODY), "x-guardian-timestamp": "17000000.5" };
+    const res = await app.handle(
+      new Request("http://localhost/v1/facility/intent-request-bindings", {
+        method: "POST",
+        headers,
+        body: BODY,
+      }),
+    );
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("scope enforcement ordering (§5.2 / §5.4)", () => {
+  const SECRET = "scope-test-secret";
+  // Both tokens lack the intent-request-bindings scope the route needs.
+  const lackingScopes = new Set(
+    ENDPOINT_SCOPES.filter((s) => s !== "facility:intent-request-bindings"),
+  ) as TokenInfo["scopes"];
+  const app = buildGuardianServer(
+    stubAbstractions({
+      authenticate: async (token) => {
+        if (token === "limited") {
+          return Result.ok({ tokenId: "limited", scopes: lackingScopes, requiresHmac: false });
+        }
+        if (token === "hmac-limited") {
+          return Result.ok({
+            tokenId: "hmac-limited",
+            scopes: lackingScopes,
+            requiresHmac: true,
+            hmacSecret: SECRET,
+          });
+        }
+        return Result.err(new UnauthenticatedError({ message: "Unknown token" }));
+      },
+    }),
+  );
+  const BODY = JSON.stringify(VALID_BINDING_BODY);
+
+  function post(headers: Record<string, string>): Request {
+    return new Request("http://localhost/v1/facility/intent-request-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...CLIENT_HEADERS, ...headers },
+      body: BODY,
+    });
+  }
+
+  it("denies an authenticated token lacking the route scope with 403", async () => {
+    const res = await app.handle(post({ authorization: "Bearer limited" }));
+    expect(res.status).toBe(403);
+    const text = await res.text();
+    expect(JSON.parse(text).error).toBe("forbidden");
+    // §5.2 — the response must not reveal which scopes the token holds.
+    expect(text).not.toContain("intent-fund-bindings");
+  });
+
+  it("answers 401, not 403, when an HMAC-flagged token lacks both the HMAC and the scope", async () => {
+    // The HMAC completes AUTHENTICATION; a stolen bearer token without
+    // the secret must not be able to read scope membership from a
+    // 401-vs-403 split across endpoints.
+    const res = await app.handle(post({ authorization: "Bearer hmac-limited" }));
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toContain("Bearer");
+  });
+
+  it("answers 403 only after a VALID HMAC proves possession of the secret", async () => {
+    const ts = String(Math.floor(Date.now() / 1000));
+    const res = await app.handle(
+      post({
+        authorization: "Bearer hmac-limited",
+        "x-guardian-timestamp": ts,
+        "x-guardian-signature": computeBodyHmacHex(SECRET, ts, new TextEncoder().encode(BODY)),
+      }),
+    );
+    expect(res.status).toBe(403);
   });
 });

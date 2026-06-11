@@ -87,11 +87,12 @@ export function rawBodyPlugin(maxBodyBytes: number = DEFAULT_MAX_BODY_BYTES) {
         return;
       }
       // Media types are case-insensitive (RFC 7231 §3.1.1.1); lowercase
-      // before matching, mirroring contentTypePlugin so the two gates
-      // can never disagree.
-      const ct = contentType.toLowerCase();
-      const isJson = ct.startsWith("application/json");
-      if (!isJson && !ct.startsWith("text/")) return;
+      // and strip parameters before matching, mirroring
+      // contentTypePlugin (exact media-type compare, not a prefix test)
+      // so the two gates can never disagree.
+      const mediaType = contentType.split(";", 1)[0]!.trim().toLowerCase();
+      const isJson = mediaType === "application/json";
+      if (!isJson && !mediaType.startsWith("text/")) return;
 
       // Fast-path rejection before any buffering when the client
       // declares an oversized body up-front. It lives here — after the

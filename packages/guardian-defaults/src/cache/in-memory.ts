@@ -14,11 +14,20 @@ import { AsyncCache } from "./types.js";
  *    bound (opt-in to unbounded growth).
  *  - `now`          — clock injection for tests. Defaults to `Date.now`.
  *    Must return milliseconds since epoch.
+ *  - `onValidationFailure` — observability hook invoked when a stored
+ *    value fails schema validation on read (see
+ *    `AsyncCache.onValidationFailure`). The read still reports a miss
+ *    and the entry is purged; use this to log/meter what would
+ *    otherwise be invisible cache poisoning or version skew.
  */
 export type InMemoryCacheOptions = {
   readonly defaultTtlMs?: number;
   readonly maxEntries?: number;
   readonly now?: () => number;
+  readonly onValidationFailure?: (
+    key: string,
+    issues: ReadonlyArray<StandardSchemaV1.Issue>,
+  ) => void;
 };
 
 /** Default `maxEntries` bound applied when none is configured. */
@@ -66,6 +75,7 @@ class InMemoryCache<V> extends AsyncCache<V> {
   private readonly defaultTtlMs: number | undefined;
   private readonly maxEntries: number;
   private readonly now: () => number;
+  private readonly notifyValidationFailure: InMemoryCacheOptions["onValidationFailure"];
   private readonly map = new Map<string, { value: V; expiresAt: number }>();
 
   constructor(schema: StandardSchemaV1<unknown, V>, options: InMemoryCacheOptions) {
@@ -84,6 +94,14 @@ class InMemoryCache<V> extends AsyncCache<V> {
     this.defaultTtlMs = defaultTtlMs;
     this.maxEntries = maxEntries;
     this.now = now;
+    this.notifyValidationFailure = options.onValidationFailure;
+  }
+
+  protected override onValidationFailure(
+    key: string,
+    issues: ReadonlyArray<StandardSchemaV1.Issue>,
+  ): void {
+    this.notifyValidationFailure?.(key, issues);
   }
 
   protected override async rawGet(key: string): Promise<unknown> {

@@ -67,15 +67,43 @@ export abstract class AsyncCache<V> {
    * entry, OR a stored value that fails schema validation — all three
    * are observationally equivalent to the caller, which falls back to
    * the authoritative fetch and overwrites the entry via `set`.
+   *
+   * A validation failure additionally (a) notifies
+   * {@link AsyncCache.onValidationFailure | onValidationFailure} and
+   * (b) best-effort deletes the entry, so a poisoned value in a shared
+   * store doesn't sit there turning every read into a full
+   * authoritative refetch until its TTL expires.
    */
   async get(key: string): Promise<V | undefined> {
     const raw = await this.rawGet(key);
     if (raw === undefined) return undefined;
     let result = this.schema["~standard"].validate(raw);
     if (result instanceof Promise) result = await result;
-    if (result.issues) return undefined;
+    if (result.issues) {
+      this.onValidationFailure(key, result.issues);
+      try {
+        await this.delete(key);
+      } catch {
+        // Best-effort purge; the read already reports a miss.
+      }
+      return undefined;
+    }
     return result.value;
   }
+
+  /**
+   * Observability hook invoked when a stored value fails schema
+   * validation on the read path. The base implementation is a no-op —
+   * the failure direction is safe (miss → authoritative refetch) — but
+   * silent failures hide active cache poisoning and the resulting load
+   * amplification from operators, so implementations SHOULD override
+   * this with a log line or metric. A thrown error here is the
+   * subclass's own bug and intentionally not swallowed.
+   */
+  protected onValidationFailure(
+    _key: string,
+    _issues: ReadonlyArray<StandardSchemaV1.Issue>,
+  ): void {}
 
   /**
    * Raw storage lookup. Returns whatever the backing store holds for

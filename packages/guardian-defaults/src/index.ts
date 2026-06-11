@@ -31,10 +31,12 @@ export {
 } from "./cache/in-memory.js";
 
 export {
+  bpsToleranceWithWeiFloor,
   buildIntentFundBindingChecks,
   buildIntentRequestBindingChecks,
   buildIntentSwapChecks,
   buildRequestWhitelistingChecks,
+  DEADLINE_CHECK_DESCRIPTION,
   DEFAULT_MAX_REQUEST_CONTRACTS,
   checkDeadline,
   checkMembership,

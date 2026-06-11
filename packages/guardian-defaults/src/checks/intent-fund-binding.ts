@@ -48,8 +48,9 @@ export type IntentFundBindingPolicy = {
  *   1. deadline within MAX_DEADLINE_SECONDS_AHEAD of now           (422)
  *   2. fund contract is on the accepted-funds list                 (422)
  *   3. fund contract owner is on the accepted-owners list          (422)
- *   4. intent has no currently bound fund                          (409)
- *   5. fund holds DEPOSITOR_ROLE for the facility (skipped)        (—)
+ *   4. positionManager matches the intent's PM-flagged asset       (422)
+ *   5. intent has no currently bound fund                          (409)
+ *   6. fund holds DEPOSITOR_ROLE for the facility (skipped)        (—)
  *
  * Stage 1 multicall reads `fund.owner()` and `facility.getIntent(id)` in
  * a single round-trip — viem decodes each call to its ABI return type
@@ -88,7 +89,7 @@ export function buildIntentFundBindingChecks(deps: {
     ctx: SigningContext,
     body: IntentFundBindingBody,
   ): Promise<Result<readonly CheckEntry[], CheckRunnerError<true>>> => {
-    const { chainId, facility, intent, fundContract, deadline } = body;
+    const { chainId, facility, intent, fundContract, positionManager, deadline } = body;
     const intentId = BigInt(intent.id);
 
     const acceptedFunds = policy.acceptedFunds.get(chainId) ?? new Set<string>();
@@ -115,6 +116,7 @@ export function buildIntentFundBindingChecks(deps: {
         deadlineCheck,
         fundOnList,
         skipped("fund contract owner is on the accepted-owners list"),
+        skipped("proposed position manager matches the intent's position-manager asset"),
         skipped("intent has no currently bound fund"),
         skipped("fund holds DEPOSITOR_ROLE for the facility"),
       ];
@@ -161,6 +163,7 @@ export function buildIntentFundBindingChecks(deps: {
               : `facility ${facility} did not answer getIntent(${intent.id}) ` +
                   "(EOA or non-facility contract); fund owner could not be read deterministically",
           ),
+          skipped("proposed position manager matches the intent's position-manager asset"),
           skipped("intent has no currently bound fund"),
           skipped("fund holds DEPOSITOR_ROLE for the facility"),
         ];
@@ -180,6 +183,10 @@ export function buildIntentFundBindingChecks(deps: {
     }
 
     const [fundOwner, intentTuple] = stage1Results;
+    const intentProperties = intentTuple[0] as {
+      readonly depositAsset: { readonly asset: Address; readonly isPositionManager: boolean };
+      readonly targetAsset: { readonly asset: Address; readonly isPositionManager: boolean };
+    };
     const currentFund = intentTuple[1] as Address;
 
     const ownerCheck = checkMembership({
@@ -188,6 +195,26 @@ export function buildIntentFundBindingChecks(deps: {
       accepted: acceptedOwners,
       addressLike: true,
     });
+
+    // `body.positionManager` is unsigned (the Facility's `setFund`
+    // verifier doesn't take it), so its only job is this check: the
+    // client-declared position manager must be the asset the intent
+    // itself flags `isPositionManager` on its deposit or target side.
+    // Without it the field would be a client-controlled input that is
+    // neither signed nor validated.
+    const pmAssets = [intentProperties.depositAsset, intentProperties.targetAsset]
+      .filter((a) => a.isPositionManager)
+      .map((a) => a.asset);
+    const pmDescription = "proposed position manager matches the intent's position-manager asset";
+    const pmCheck = pmAssets.some((a) => a.toLowerCase() === positionManager.toLowerCase())
+      ? passed(pmDescription)
+      : failed(
+          pmDescription,
+          pmAssets.length === 0
+            ? `intent ${intent.id} declares no position-manager asset`
+            : `intent ${intent.id} declares position-manager asset(s) ${pmAssets.join(", ")} ` +
+                `but the request proposes ${positionManager}`,
+        );
 
     // 409-class: the intent must have no currently bound fund. The
     // on-chain `setFund` will revert if a current fund exists, so this
@@ -211,12 +238,13 @@ export function buildIntentFundBindingChecks(deps: {
       deadlineCheck,
       fundOnList,
       ownerCheck,
+      pmCheck,
       noCurrentFundCheck,
       depositorRoleCheck,
     ];
 
     // §6.6.1: 422 wins over 409 when both fail.
-    const class422 = [deadlineCheck, fundOnList, ownerCheck, depositorRoleCheck];
+    const class422 = [deadlineCheck, fundOnList, ownerCheck, pmCheck, depositorRoleCheck];
     if (class422.some((c) => !c.passed)) {
       const r = rollUp(all, "Appendix A.2 checks failed");
       return r.ok ? Result.ok(r.checks) : Result.err(r.error);

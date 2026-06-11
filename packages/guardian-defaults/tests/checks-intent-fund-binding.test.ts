@@ -51,10 +51,15 @@ function getIntentResult(args: {
   fund: Address;
   request?: Address;
   resolved?: boolean;
+  depositAsset?: { asset: Address; isPositionManager: boolean };
+  targetAsset?: { asset: Address; isPositionManager: boolean };
 }): readonly [unknown, Address, Address, boolean] {
   const properties = {
-    depositAsset: { asset: zeroAddress as Address, isPositionManager: false },
-    targetAsset: { asset: zeroAddress as Address, isPositionManager: true },
+    depositAsset: args.depositAsset ?? { asset: zeroAddress as Address, isPositionManager: false },
+    // Default mirrors the body fixture: the intent's PM-flagged asset
+    // IS the proposed `positionManager`, so the §A.2 PM-match check
+    // passes unless a test overrides it.
+    targetAsset: args.targetAsset ?? { asset: PM, isPositionManager: true },
     depositCap: 0n,
     guardKey: zeroAddress as Address,
     resolveStart: 0,
@@ -132,6 +137,7 @@ describe("buildIntentFundBindingChecks", () => {
       const checks = (r.error as ValidationFailedError).checks;
       expect(checks.filter((c) => c.skipped === true).map((c) => c.description)).toEqual([
         "fund contract owner is on the accepted-owners list",
+        "proposed position manager matches the intent's position-manager asset",
         "intent has no currently bound fund",
         "fund holds DEPOSITOR_ROLE for the facility",
       ]);
@@ -149,6 +155,64 @@ describe("buildIntentFundBindingChecks", () => {
     const r = await run(ctx(client), baseBody);
     expect(r.isErr()).toBe(true);
     if (r.isErr()) expect(r.error).toBeInstanceOf(ValidationFailedError);
+  });
+
+  it("returns 422 when the proposed position manager is not the intent's PM-flagged asset", async () => {
+    const stage1 = [
+      FUND_OWNER,
+      getIntentResult({
+        fund: zeroAddress as Address,
+        targetAsset: { asset: SOME_FUND, isPositionManager: true }, // ≠ baseBody.positionManager
+      }),
+    ];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const pm = (r.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("position-manager asset"),
+      );
+      expect(pm?.passed).toBe(false);
+      expect(pm?.reason).toContain(SOME_FUND);
+    }
+  });
+
+  it("accepts the position manager when it matches the deposit-asset side", async () => {
+    const stage1 = [
+      FUND_OWNER,
+      getIntentResult({
+        fund: zeroAddress as Address,
+        depositAsset: { asset: PM, isPositionManager: true },
+        targetAsset: { asset: SOME_FUND, isPositionManager: false },
+      }),
+    ];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isOk()).toBe(true);
+  });
+
+  it("returns 422 when the intent declares no position-manager asset at all", async () => {
+    const stage1 = [
+      FUND_OWNER,
+      getIntentResult({
+        fund: zeroAddress as Address,
+        targetAsset: { asset: SOME_FUND, isPositionManager: false },
+      }),
+    ];
+    const { client } = makeClient([stage1]);
+    const run = buildIntentFundBindingChecks({ policy: basePolicy });
+    const r = await run(ctx(client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      expect(r.error).toBeInstanceOf(ValidationFailedError);
+      const pm = (r.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("position-manager asset"),
+      );
+      expect(pm?.reason).toMatch(/declares no position-manager asset/);
+    }
   });
 
   it("returns 409 (StateConflictError) when only the current-fund check fails", async () => {
@@ -218,6 +282,7 @@ describe("buildIntentFundBindingChecks", () => {
       expect(owner?.reason).toMatch(/did not answer owner\(\)/);
       // Downstream on-chain entries are unknowable — emitted as skipped.
       expect(checks.filter((c) => c.skipped === true).map((c) => c.description)).toEqual([
+        "proposed position manager matches the intent's position-manager asset",
         "intent has no currently bound fund",
         "fund holds DEPOSITOR_ROLE for the facility",
       ]);

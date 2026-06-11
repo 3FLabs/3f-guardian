@@ -44,6 +44,11 @@ export function errorHandlerPlugin(logger: Logger | undefined) {
       const guardianError = toGuardianError(error, code, log.child({ requestId }));
       const resolved = resolveError(guardianError, requestId);
       set.status = resolved.status;
+      if (resolved.status === 401) {
+        // RFC 9110 §11.6.1: a 401 MUST carry WWW-Authenticate naming
+        // the applicable scheme.
+        set.headers["WWW-Authenticate"] = 'Bearer realm="guardian"';
+      }
       if (resolved.retryAfterSeconds !== undefined) {
         set.headers[PROTECTED_RESPONSE_HEADERS.RETRY_AFTER] = String(resolved.retryAfterSeconds);
       }

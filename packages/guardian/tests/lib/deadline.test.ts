@@ -94,14 +94,20 @@ describe("resolveGuardianTimeouts", () => {
     });
   });
 
-  it.each([Number.NaN, 0, -1, Number.POSITIVE_INFINITY])(
+  it.each([Number.NaN, 0, -1, Number.POSITIVE_INFINITY, 2 ** 31])(
     "throws at construction for rateLimitMs = %s",
     (value) => {
       expect(() => resolveGuardianTimeouts({ rateLimitMs: value })).toThrow(
-        /timeouts\.rateLimitMs must be a positive finite number/,
+        /timeouts\.rateLimitMs must be a positive number of at most 2147483647ms/,
       );
     },
   );
+
+  it("accepts the setTimeout maximum exactly", () => {
+    // 2^31 − 1 is the largest delay setTimeout represents faithfully;
+    // one above it wraps to ~1 ms (covered by the rejection case above).
+    expect(resolveGuardianTimeouts({ signMs: 2 ** 31 - 1 }).signMs).toBe(2 ** 31 - 1);
+  });
 
   it("throws with the offending key name for every field", () => {
     for (const key of ["authenticateMs", "rateLimitMs", "livenessMs", "signMs"] as const) {

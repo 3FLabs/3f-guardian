@@ -16,6 +16,9 @@ jobs:
   verify:
     name: build + lint + typecheck + test + integration
     runs-on: ubuntu-latest
+    # The whole suite finishes in ~1 minute; a hung anvil/network step
+    # should fail loudly, not burn the runner's 6-hour default.
+    timeout-minutes: 15
     steps:
       # No later step needs git credentials (we never push from CI), so
       # don't leave the GITHUB_TOKEN sitting in .git/config for the rest
@@ -44,15 +47,18 @@ jobs:
 
       # `anvil` is required by the prool-backed integration suite (one
       # instance per vitest worker, multiplexed via path-routed URLs in
-      # `@3flabs/guardian-test-fixtures`); we don't run `forge build`
-      # here because all foundry artifacts are bundled in
+      # `@3flabs/guardian-test-fixtures`) and `forge` by the local
+      # fixture build below; sibling-repo artifacts stay bundled in
       # `packages/guardian-test-fixtures/artifacts/`. Pinned to v1.7.1
       # — the latest foundry release, matching local dev and the
       # bundled fixtures — rather than `stable` so runs are
       # reproducible. Known tradeoff: the action fetches the foundryup
       # installer from foundry HEAD at run time, so the action SHA pin
-      # does not pin the installer script; the binaries it installs are
-      # the pinned release, attestation-verified by foundryup.
+      # does not pin the installer script, and foundryup's attestation
+      # check is best-effort (it skips rather than fails when `gh` /
+      # the attestation API is unavailable) — the binaries are NOT
+      # cryptographically verified end-to-end. Accepted for now; the
+      # alternative is vendoring a checksummed tarball download.
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
         with:
@@ -61,10 +67,20 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
+      # Compile the locally-vendored test contracts so the fixtures
+      # check below byte-compares the two `local` artifacts against a
+      # fresh build. `contracts/out` is gitignored and sibling repos
+      # don't exist on a plain runner, so without this step the drift
+      # check validates stamps only — a PR could edit a local `.sol`
+      # without re-extracting and stay green.
+      - name: Build local fixture contracts
+        run: forge build --root packages/guardian-test-fixtures/contracts
+
       # Validates the bundled contract fixtures (artifact integrity +
-      # INDEX consistency). Sibling-repo drift detection is skipped with
-      # a notice when the sibling checkouts aren't present — which is
-      # always the case on a plain runner.
+      # INDEX consistency) and byte-compares the local artifacts against
+      # the forge output built above. Sibling-repo drift detection is
+      # still skipped with a notice when the sibling checkouts aren't
+      # present — which is always the case on a plain runner.
       - name: Fixtures check
         run: bun run fixtures:check
 

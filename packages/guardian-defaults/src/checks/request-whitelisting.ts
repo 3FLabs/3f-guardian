@@ -14,6 +14,7 @@ import {
   checkDeadline,
   checkMembership,
   checkNonceWindow,
+  DEADLINE_CHECK_DESCRIPTION,
   failed,
   isDeterministicContractCallFailure,
   passed,
@@ -187,20 +188,27 @@ export function buildRequestWhitelistingChecks(deps: {
         if (r.isErr()) {
           // runA1 may emit a ValidationFailedError (rolled-up checks)
           // OR an UpstreamUnavailableError. Validation failures
-          // contribute their entries verbatim with the per-contract
-          // suffix so the §6.4.1 array describes the full batch; RPC
-          // failures bail immediately.
+          // contribute their entries with the per-contract suffix so
+          // the §6.4.1 array describes the full batch; RPC failures
+          // bail immediately.
           if (r.error instanceof UpstreamUnavailableError) {
             return Result.err(r.error);
           }
           for (const entry of r.error.checks) {
+            // Same dedup as the success branch: the per-contract §A.1
+            // deadline entry is computed from the identical inputs
+            // (body.deadline, ctx.now) as the request-wide one added
+            // below, so keeping it here would emit a duplicated —
+            // and per-contract-suffixed — deadline check only on the
+            // failure path, an inconsistent wire shape.
+            if (isA1DeadlineEntry(entry)) continue;
             checks.push(suffixed(entry, requestContract));
           }
         } else {
           // Drop the §A.1 deadline check — it duplicates the request-
           // wide one we add below — and suffix the rest.
           for (const entry of r.value) {
-            if (entry.description.startsWith("deadline within")) continue;
+            if (isA1DeadlineEntry(entry)) continue;
             checks.push(suffixed(entry, requestContract));
           }
         }
@@ -298,6 +306,15 @@ export function buildRequestWhitelistingChecks(deps: {
  * and carries a reason, but the schema types `reason` as optional, so
  * we keep a non-empty string to satisfy the wire validator.
  */
+/**
+ * True for the §A.1 runner's deadline entry (it always uses
+ * `checkDeadline`'s default description). The batch runner drops it in
+ * favour of the single request-wide deadline entry it emits itself.
+ */
+function isA1DeadlineEntry(entry: CheckEntry): boolean {
+  return entry.description === DEADLINE_CHECK_DESCRIPTION;
+}
+
 function suffixed(entry: CheckEntry, contract: string): CheckEntry {
   const description = `${entry.description} (for ${contract})`;
   if (entry.skipped) return skipped(description);

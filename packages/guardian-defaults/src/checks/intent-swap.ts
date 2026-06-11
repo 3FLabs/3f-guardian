@@ -11,6 +11,7 @@ import {
 import { positionManagerAbi, VIRTUAL_ASSETS } from "../abi/position-manager.js";
 import { positionManagerFactoryAbi } from "../abi/position-manager-factory.js";
 import {
+  bpsToleranceWithWeiFloor,
   checkDeadline,
   checkMembership,
   failed,
@@ -337,12 +338,10 @@ export function buildIntentSwapChecks(deps: {
         const expectedDebt = (pmShares * (totalAssets_ + VIRTUAL_ASSETS)) / denom;
         const delta =
           actualDebt > expectedDebt ? actualDebt - expectedDebt : expectedDebt - actualDebt;
-        const toleranceBps = BigInt(policy.swapPriceToleranceBps);
-        const proportional = (expectedDebt * toleranceBps) / 10_000n;
-        // Floor at 1 wei for any non-zero bps: the bps math floors to
-        // zero whenever expectedDebt * bps < 10_000, which would deny
-        // small legs the documented ~1 wei mulDiv rounding slack.
-        const tolerance = proportional > 0n ? proportional : toleranceBps > 0n ? 1n : 0n;
+        const tolerance = bpsToleranceWithWeiFloor(
+          expectedDebt,
+          BigInt(policy.swapPriceToleranceBps),
+        );
         priceCheck =
           delta <= tolerance
             ? passed("swap legs match the position-manager share price within tolerance")

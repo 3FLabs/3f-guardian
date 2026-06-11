@@ -120,6 +120,14 @@ export function checkMembership(args: {
 }
 
 /**
+ * Default description emitted by {@link checkDeadline}. Exported so
+ * composing runners (the §A.4 batch) can identify — and dedup — a
+ * nested runner's deadline entry by exact match instead of a fragile
+ * prefix test.
+ */
+export const DEADLINE_CHECK_DESCRIPTION = "deadline within MAX_DEADLINE_SECONDS_AHEAD of now";
+
+/**
  * §A.* deadline check (§7.7).
  *
  * Returns failed iff `deadline > now + maxSecondsAhead`. The spec only
@@ -134,7 +142,7 @@ export function checkDeadline(args: {
   maxSecondsAhead: number;
 }): CheckEntry {
   const {
-    description = "deadline within MAX_DEADLINE_SECONDS_AHEAD of now",
+    description = DEADLINE_CHECK_DESCRIPTION,
     nowUnixSeconds,
     deadline,
     maxSecondsAhead,
@@ -194,13 +202,26 @@ export function checkSwapPriceTolerance(args: {
   const observed = (amountA * WAD) / amountB;
   const delta =
     observed > referencePriceWad ? observed - referencePriceWad : referencePriceWad - observed;
-  const tolerance = (referencePriceWad * BigInt(toleranceBps)) / 10_000n;
+  const tolerance = bpsToleranceWithWeiFloor(referencePriceWad, BigInt(toleranceBps));
   if (delta <= tolerance) return passed(description);
   return failed(
     description,
     `observed ratio ${observed} deviates from reference ${referencePriceWad} ` +
       `by ${delta} (tolerance=${tolerance}, bps=${toleranceBps})`,
   );
+}
+
+/**
+ * Absolute tolerance for a bps-of-expected comparison, floored at 1 wei
+ * for any non-zero bps: the proportional math floors to zero whenever
+ * `expected * bps < 10_000`, which would deny small values the
+ * documented ~1 wei mulDiv rounding slack. Shared by
+ * {@link checkSwapPriceTolerance} and the §A.3 runner so the two
+ * security-relevant fixed-point paths cannot diverge.
+ */
+export function bpsToleranceWithWeiFloor(expected: bigint, toleranceBps: bigint): bigint {
+  const proportional = (expected * toleranceBps) / 10_000n;
+  return proportional > 0n ? proportional : toleranceBps > 0n ? 1n : 0n;
 }
 
 /**

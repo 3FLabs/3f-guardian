@@ -75,20 +75,26 @@ export function makeAuthPlugin(abs: GuardianAbstractions) {
         const tokenInfo = authResult.value;
         const requestLogger = logger.child({ tokenId: tokenInfo.tokenId });
 
-        // §5.2 — scope check. MUST NOT reveal which scopes the token holds.
-        if (!tokenInfo.scopes.has(requiredScope)) {
-          requestLogger.warn({ scope: requiredScope }, "auth: token lacks scope");
-          throw new ForbiddenError({
-            message: "Token lacks the scope required by this endpoint (§5.2).",
-          });
-        }
-
+        // §5.4 — HMAC body signing completes AUTHENTICATION for
+        // HMAC-flagged tokens, so it must run before the §5.2 scope
+        // check: an attacker holding a stolen bearer token but not the
+        // HMAC secret (exactly the threat the flag defends against)
+        // must see a uniform 401, not a 401-vs-403 split that leaks
+        // scope membership through the status code.
         if (tokenInfo.requiresHmac) {
           verifyHmac({
             request,
             rawBody,
             secret: requireSecret(tokenInfo, requestLogger),
             logger: requestLogger,
+          });
+        }
+
+        // §5.2 — scope check. MUST NOT reveal which scopes the token holds.
+        if (!tokenInfo.scopes.has(requiredScope)) {
+          requestLogger.warn({ scope: requiredScope }, "auth: token lacks scope");
+          throw new ForbiddenError({
+            message: "Token lacks the scope required by this endpoint (§5.2).",
           });
         }
 
