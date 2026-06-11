@@ -46,29 +46,17 @@ jobs:
       # instance per vitest worker, multiplexed via path-routed URLs in
       # `@3flabs/guardian-test-fixtures`); we don't run `forge build`
       # here because all foundry artifacts are bundled in
-      # `packages/guardian-test-fixtures/artifacts/`. We deliberately
-      # avoid foundry-rs/foundry-toolchain: its v1.8.0 rewrite executes
-      # the foundryup installer fetched from foundry HEAD on every run,
-      # so SHA-pinning the action doesn't pin the code that actually
-      # runs. Instead, download the exact v1.7.1 release tarball and
-      # verify its published SHA-256 (pinned below, cross-checked
-      # against foundry_v1.7.1_linux_amd64.sha256 on the release) before
-      # putting `anvil` / `forge` / `cast` on `PATH` — every executed
-      # byte is now pinned, so runs are reproducible.
+      # `packages/guardian-test-fixtures/artifacts/`. Pinned to v1.7.1
+      # — the latest foundry release, matching local dev and the
+      # bundled fixtures — rather than `stable` so runs are
+      # reproducible. Known tradeoff: the action fetches the foundryup
+      # installer from foundry HEAD at run time, so the action SHA pin
+      # does not pin the installer script; the binaries it installs are
+      # the pinned release, attestation-verified by foundryup.
       - name: Install Foundry
-        env:
-          FOUNDRY_VERSION: v1.7.1
-          FOUNDRY_TAR_SHA256: cf7e688ed0c4c48adffca788b496076e31060b67ac5afe1e43dbb5499c20c88b
-        run: |
-          set -euo pipefail
-          cd "${RUNNER_TEMP}"
-          curl -fsSL --retry 3 -o foundry.tar.gz \
-            "https://github.com/foundry-rs/foundry/releases/download/${FOUNDRY_VERSION}/foundry_${FOUNDRY_VERSION}_linux_amd64.tar.gz"
-          echo "${FOUNDRY_TAR_SHA256}  foundry.tar.gz" | sha256sum -c -
-          mkdir -p "${HOME}/.foundry/bin"
-          tar -xzf foundry.tar.gz -C "${HOME}/.foundry/bin" anvil forge cast
-          rm foundry.tar.gz
-          echo "${HOME}/.foundry/bin" >> "${GITHUB_PATH}"
+        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
+        with:
+          version: v1.7.1
 
       - name: Install
         run: bun install --frozen-lockfile
