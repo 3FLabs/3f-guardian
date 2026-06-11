@@ -190,6 +190,42 @@ describe("AsyncCache (abstract base)", () => {
     expect(await cache.get("k")).toBeUndefined();
   });
 
+  it("supports a schema whose ~standard.validate is asynchronous", async () => {
+    // The spec allows validate to return a Promise (e.g. async refines);
+    // the base class must await it on both the hit and the miss path.
+    const asyncSchema = {
+      "~standard": {
+        version: 1 as const,
+        vendor: "test",
+        validate: async (value: unknown) =>
+          typeof value === "number"
+            ? { value }
+            : { issues: [{ message: "expected a number" }] as const },
+      },
+    };
+    class AsyncValidatedCache extends AsyncCache<number> {
+      private stored: unknown;
+      constructor() {
+        super(asyncSchema);
+      }
+      protected override async rawGet(): Promise<unknown> {
+        return this.stored;
+      }
+      override async set(_key: string, value: number): Promise<void> {
+        this.stored = value;
+      }
+      override async delete(): Promise<void> {
+        this.stored = undefined;
+      }
+    }
+    const cache = new AsyncValidatedCache();
+    await cache.set("k", 7);
+    expect(await cache.get("k")).toBe(7);
+    // Poison the raw store: the async validation failure must be a miss.
+    await cache.set("k", "poison" as unknown as number);
+    expect(await cache.get("k")).toBeUndefined();
+  });
+
   it("keeps undefined from rawGet as a plain miss without invoking validation", async () => {
     const probe = z.unknown().refine(() => {
       throw new Error("validate must not run on a miss");

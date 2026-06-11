@@ -12,6 +12,7 @@ import {
   type SigningSuccess,
   type TokenInfo,
 } from "../src/index.js";
+import { computeBodyHmacHex } from "../src/lib/hmac.js";
 
 /**
  * Build a stub abstraction good enough to exercise the HTTP shell. None
@@ -492,20 +493,57 @@ describe("§6.2 client-identification headers", () => {
         headers: {
           "content-type": "application/json",
           authorization: "Bearer valid",
+          "x-guardian-signature": "deadbeef-live-signature",
           "x-client-name": "smoke-tests",
         },
         body: JSON.stringify(VALID_BINDING_BODY),
       }),
     );
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe("bad_request");
+    const text = await res.text();
+    expect((JSON.parse(text) as { error: string }).error).toBe("bad_request");
+    // Credential-echo regression: Elysia's ValidationError embeds the
+    // whole header object (`found`) in its message — auth runs before
+    // validation, so the echoed credentials are always LIVE ones. The
+    // sanitized envelope must never contain them.
+    expect(text).not.toContain("Bearer");
+    expect(text).not.toContain("deadbeef-live-signature");
+    expect(text).not.toContain("authorization");
+    // ...while still telling the caller which header failed.
+    expect(text).toContain("x-client-version");
   });
 
   it("rejects an authenticated request with a malformed X-Client-Version with 400", async () => {
     const res = await app.handle(postBinding({ headers: { "x-client-version": "banana" } }));
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe("bad_request");
+    const text = await res.text();
+    expect((JSON.parse(text) as { error: string }).error).toBe("bad_request");
+    expect(text).not.toContain("Bearer");
+    expect(text).not.toContain("authorization");
+  });
+
+  it("maps a Guardian-side response-schema violation to 500, not 400", async () => {
+    // The abstraction returns a payload violating zSigningSuccess. That
+    // is a SERVER bug: blaming the caller with a 400 would have a
+    // well-behaved client retry a request that can never succeed.
+    const broken = buildGuardianServer(
+      stubAbstractions({
+        signIntentRequestBinding: async () =>
+          Result.ok({
+            guardian: "0x0000000000000000000000000000000000000001",
+            signature: "not-a-hex-signature",
+            payloadHash: ("0x" + "b".repeat(64)) as `0x${string}`,
+            signedAt: "2026-04-22T10:15:00Z",
+            checks: [],
+          } as never),
+      }),
+    );
+    const res = await broken.handle(postBinding());
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("internal_error");
+    // The malformed internal payload must not be echoed to the caller.
+    expect(body.message).not.toContain("not-a-hex-signature");
   });
 
   it("auth failures still preempt missing client headers (401 before 400)", async () => {
@@ -567,5 +605,103 @@ describe("host composition", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ a: "1", b: "2" });
+  });
+});
+
+describe("HMAC-flagged tokens end-to-end (§5.4)", () => {
+  const SECRET = "test-hmac-secret";
+  const hmacToken: TokenInfo = {
+    tokenId: "hmac-token",
+    scopes: new Set(ENDPOINT_SCOPES),
+    requiresHmac: true,
+    hmacSecret: SECRET,
+  };
+  const app = buildGuardianServer(
+    stubAbstractions({
+      authenticate: async (token) =>
+        token === "hmac-valid"
+          ? Result.ok(hmacToken)
+          : Result.err(new UnauthenticatedError({ message: "Unknown token" })),
+    }),
+  );
+  const BODY = JSON.stringify(VALID_BINDING_BODY);
+
+  function signedHeaders(body: string): Record<string, string> {
+    const ts = String(Math.floor(Date.now() / 1000));
+    return {
+      "content-type": "application/json",
+      authorization: "Bearer hmac-valid",
+      ...CLIENT_HEADERS,
+      "x-guardian-timestamp": ts,
+      "x-guardian-signature": computeBodyHmacHex(SECRET, ts, new TextEncoder().encode(body)),
+    };
+  }
+
+  /** Deliver `json` in small chunks so the raw-body reader takes the streamed path. */
+  function chunked(json: string, size = 5): ReadableStream<Uint8Array> {
+    const bytes = new TextEncoder().encode(json);
+    let off = 0;
+    return new ReadableStream({
+      pull(controller) {
+        if (off >= bytes.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(bytes.slice(off, off + size));
+        off += size;
+      },
+    });
+  }
+
+  it("accepts a correctly signed buffered body", async () => {
+    const res = await app.handle(
+      new Request("http://localhost/v1/facility/intent-request-bindings", {
+        method: "POST",
+        headers: signedHeaders(BODY),
+        body: BODY,
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("accepts a correctly signed CHUNKED body — HMAC over the streamed byte path", async () => {
+    // The §5.4 HMAC covers the EXACT wire bytes, which for a chunked
+    // request are assembled by the raw-body reader's streaming branch.
+    // This pins that the assembled bytes equal what the client signed.
+    const res = await app.handle(
+      new Request("http://localhost/v1/facility/intent-request-bindings", {
+        method: "POST",
+        headers: signedHeaders(BODY),
+        body: chunked(BODY),
+        // Required by the fetch spec for stream bodies.
+        duplex: "half",
+      } as RequestInit),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects a body that does not match the signature with 401", async () => {
+    const tampered = JSON.stringify({ ...VALID_BINDING_BODY, deadline: 1_800_000_001 });
+    const res = await app.handle(
+      new Request("http://localhost/v1/facility/intent-request-bindings", {
+        method: "POST",
+        headers: signedHeaders(BODY), // signed over BODY, sending tampered
+        body: tampered,
+      }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a missing signature on an HMAC-flagged token with 401", async () => {
+    const headers = signedHeaders(BODY);
+    delete headers["x-guardian-signature"];
+    const res = await app.handle(
+      new Request("http://localhost/v1/facility/intent-request-bindings", {
+        method: "POST",
+        headers,
+        body: BODY,
+      }),
+    );
+    expect(res.status).toBe(401);
   });
 });

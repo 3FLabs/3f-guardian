@@ -19,6 +19,15 @@ import type { StandardSchemaV1 } from "./standard-schema.js";
  * `new MyCache(z.object({ … }))` works without this package depending
  * on a specific validation library.
  *
+ * The schema MUST be idempotent over its own output: `set` stores `V`
+ * (the schema's OUTPUT type), and `get` re-validates exactly that
+ * shape, so the output must itself parse. A transforming schema whose
+ * output no longer satisfies its input (e.g. `z.string().transform(s
+ * => s.length)`) silently disables the cache — every hit fails
+ * validation and reads as a miss — and one whose transform is
+ * re-applicable (e.g. doubling a number) would re-run it on every
+ * read. Pure validation schemas like `zA1OnChainData` are always safe.
+ *
  * Implementations MUST:
  *   - Be safe to call concurrently for the same key (last write wins is
  *     acceptable; consumers tolerate redundant fetches on contention).

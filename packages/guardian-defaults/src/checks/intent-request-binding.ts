@@ -21,6 +21,7 @@ import {
   isMulticallChunkFailure,
   passed,
   rollUp,
+  sanitizeErr,
   skipped,
 } from "./helpers.js";
 import { holdersOf, scanRoleHolders } from "./role-events.js";
@@ -284,7 +285,7 @@ export async function runA1(
       onChain = await cache.get(cacheKey);
     } catch (e) {
       ctx.logger.warn(
-        { err: e instanceof Error ? e.message : e, requestContract },
+        { err: sanitizeErr(e), requestContract },
         "A.1: cache.get failed; treating as miss",
       );
     }
@@ -300,7 +301,7 @@ export async function runA1(
         await cache.set(cacheKey, onChain, cacheTtlMs !== undefined ? { ttlMs: cacheTtlMs } : {});
       } catch (e) {
         ctx.logger.warn(
-          { err: e instanceof Error ? e.message : e, requestContract },
+          { err: sanitizeErr(e), requestContract },
           "A.1: cache.set failed; continuing without cache write",
         );
       }
@@ -360,10 +361,7 @@ async function fetchA1OnChain(
     // land here under `allowFailure: true` — they surface as per-slot
     // failures with `functionName: "aggregate3"`, handled in the slot
     // branches below. Keep the 503 path; never cached.
-    ctx.logger.error(
-      { err: e instanceof Error ? e.message : e, requestContract },
-      "A.1: stage 1 multicall failed",
-    );
+    ctx.logger.error({ err: sanitizeErr(e), requestContract }, "A.1: stage 1 multicall failed");
     return Result.err(
       new UpstreamUnavailableError({
         message: "request-contract read failed upstream",
@@ -382,13 +380,13 @@ async function fetchA1OnChain(
     // the 503 path and is never cached.
     if (isDeterministicContractCallFailure(ownerSlot.error, ["owner"])) {
       ctx.logger.warn(
-        { err: ownerSlot.error.message, requestContract },
+        { err: sanitizeErr(ownerSlot.error), requestContract },
         "A.1: owner() reverted or returned no data; treating as noFactory",
       );
       return Result.ok({ kind: "noFactory" });
     }
     ctx.logger.error(
-      { err: ownerSlot.error.message, requestContract },
+      { err: sanitizeErr(ownerSlot.error), requestContract },
       isMulticallChunkFailure(ownerSlot.error)
         ? "A.1: stage 1 multicall failed upstream (transport)"
         : "A.1: owner() read failed",
@@ -415,7 +413,7 @@ async function fetchA1OnChain(
       // (the aggregate3 call itself) is upstream health, not operator
       // config — log it without the configuration hint.
       ctx.logger.error(
-        { err: slot.error.message, factory, requestContract },
+        { err: sanitizeErr(slot.error), factory, requestContract },
         isMulticallChunkFailure(slot.error)
           ? "A.1: factory isRequest() read failed upstream (transport)"
           : "A.1: accepted factory did not answer isRequest(); " +
@@ -461,7 +459,7 @@ async function fetchA1OnChain(
     // entirely (spurious 422s).
     latestBlock = await ctx.client.getBlockNumber({ cacheTime: 0 });
   } catch (e) {
-    ctx.logger.error({ err: e instanceof Error ? e.message : e }, "A.1: getBlockNumber failed");
+    ctx.logger.error({ err: sanitizeErr(e) }, "A.1: getBlockNumber failed");
     return Result.err(
       new UpstreamUnavailableError({
         message: "getBlockNumber failed upstream",
@@ -488,7 +486,7 @@ async function fetchA1OnChain(
     });
   } catch (e) {
     ctx.logger.error(
-      { err: e instanceof Error ? e.message : e, requestContract, factory },
+      { err: sanitizeErr(e), requestContract, factory },
       "A.1: role-events scan failed",
     );
     return Result.err(

@@ -17,6 +17,7 @@ import {
   isDeterministicContractCallFailure,
   passed,
   rollUp,
+  sanitizeErr,
   skipped,
 } from "./helpers.js";
 import type { CheckRunner, CheckRunnerError } from "./types.js";
@@ -144,7 +145,7 @@ export function buildIntentFundBindingChecks(deps: {
       // call itself) keep the 503 path.
       if (isDeterministicContractCallFailure(e, ["owner", "getIntent"])) {
         ctx.logger.warn(
-          { err: e instanceof Error ? e.message : e, fundContract, facility, intentId: intent.id },
+          { err: sanitizeErr(e), fundContract, facility, intentId: intent.id },
           "A.2: stage 1 read reverted or returned no data; treating as check failure",
         );
         const ownerReadFailed =
@@ -167,7 +168,7 @@ export function buildIntentFundBindingChecks(deps: {
         return r.ok ? Result.ok(r.checks) : Result.err(r.error);
       }
       ctx.logger.error(
-        { err: e instanceof Error ? e.message : e, fundContract, facility, intentId: intent.id },
+        { err: sanitizeErr(e), fundContract, facility, intentId: intent.id },
         "A.2: stage 1 multicall failed",
       );
       return Result.err(

@@ -56,6 +56,7 @@ function makeClient(args: {
     fromBlock?: bigint;
     toBlock?: bigint;
   }) => Array<{
+    address: Address;
     eventName: "RolesUpdated" | "RequestCreated";
     blockNumber: bigint;
     logIndex: number;
@@ -135,18 +136,21 @@ function ctx(client: SigningContext["client"], now = new Date(1_700_000_000_000)
 function happyEvents(rc: Address) {
   return [
     {
+      address: FACTORY,
       eventName: "RequestCreated" as const,
       blockNumber: 5_000n,
       logIndex: 0,
       args: { request: rc },
     },
     {
+      address: rc,
       eventName: "RolesUpdated" as const,
       blockNumber: 5_000n,
       logIndex: 1,
       args: { user: PULLER, roles: ROLE_PULLER },
     },
     {
+      address: rc,
       eventName: "RolesUpdated" as const,
       blockNumber: 5_000n,
       logIndex: 2,
@@ -387,18 +391,21 @@ describe("buildRequestWhitelistingChecks", () => {
       ],
       getLogs: () => [
         {
+          address: FACTORY,
           eventName: "RequestCreated",
           blockNumber: 5_000n,
           logIndex: 0,
           args: { request: RC1 },
         },
         {
+          address: RC1,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC1,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,

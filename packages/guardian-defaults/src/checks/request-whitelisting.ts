@@ -18,6 +18,7 @@ import {
   isDeterministicContractCallFailure,
   passed,
   rollUp,
+  sanitizeErr,
   skipped,
 } from "./helpers.js";
 import {
@@ -247,7 +248,7 @@ export function buildRequestWhitelistingChecks(deps: {
       // failures keep the 503 path.
       if (isDeterministicContractCallFailure(e, ["validatorNonceFloor", "isNonceConsumed"])) {
         ctx.logger.warn(
-          { err: e instanceof Error ? e.message : e, whitelistBook: body.whitelistBook },
+          { err: sanitizeErr(e), whitelistBook: body.whitelistBook },
           "A.4: whitelist-book read reverted or returned no data; treating as check failure",
         );
         checks.push(
@@ -262,7 +263,7 @@ export function buildRequestWhitelistingChecks(deps: {
         return r.ok ? Result.ok(r.checks) : Result.err(r.error);
       }
       ctx.logger.error(
-        { err: e instanceof Error ? e.message : e, whitelistBook: body.whitelistBook },
+        { err: sanitizeErr(e), whitelistBook: body.whitelistBook },
         "A.4: whitelist-book read failed",
       );
       return Result.err(

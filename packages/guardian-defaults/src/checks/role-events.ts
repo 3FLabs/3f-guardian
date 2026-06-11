@@ -60,6 +60,11 @@ type ChunkLog = {
  * to the two event signatures via viem's typed `events` API. The
  * factory's `RequestCreated` event does not index `request`, so the
  * deployment match is decided client-side after viem decodes the args.
+ * Every decoded log is additionally attributed to its emitting address
+ * client-side: only `RolesUpdated` emitted by `requestContract` enters
+ * the replay, and only `RequestCreated` emitted by `factory` can mark
+ * the deployment — the OR-of-addresses wire filter alone would let a
+ * factory-emitted `RolesUpdated` pollute the holder map.
  *
  * Replays role state by setting `state[user] = roles` for every
  * `RolesUpdated` log, in increasing (block, logIndex) order — solady
@@ -102,6 +107,7 @@ export async function scanRoleHolders(args: {
   const earliestAllowed = latestBlock > maxLookbackBlocks ? latestBlock - maxLookbackBlocks : 0n;
 
   const requestContractLower = requestContract.toLowerCase();
+  const factoryLower = factory.toLowerCase();
 
   const allLogs: ChunkLog[] = [];
 
@@ -140,14 +146,28 @@ export async function scanRoleHolders(args: {
     });
 
     for (const log of logs) {
+      // Attribute every event to its EMITTER. The single getLogs call
+      // filters `address ∈ {factory, requestContract}` × both topics,
+      // so a `RolesUpdated` emitted by the FACTORY (solady OwnableRoles
+      // factories emit the same event for their own roles) arrives in
+      // the same batch as the request contract's. Replaying it into the
+      // request contract's holder map would be fail-open: a
+      // factory-level grant with an overlapping role bit could mask an
+      // empty request-contract holder set into a pass. Likewise a
+      // `RequestCreated` not emitted by THIS factory must never count
+      // as the deployment marker.
+      const emitter = log.address.toLowerCase();
       if (log.eventName === "RequestCreated") {
+        if (emitter !== factoryLower) continue;
         const created = log.args.request;
         if (created && created.toLowerCase() === requestContractLower) {
           foundDeploymentBlock = log.blockNumber;
         }
+        continue;
       }
+      if (log.eventName !== "RolesUpdated" || emitter !== requestContractLower) continue;
       allLogs.push({
-        eventName: log.eventName as "RolesUpdated" | "RequestCreated",
+        eventName: log.eventName,
         blockNumber: log.blockNumber,
         logIndex: log.logIndex,
         args: log.args as { user?: Address; roles?: bigint; request?: Address },

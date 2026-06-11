@@ -399,6 +399,12 @@ so a poisoned, truncated, or old-package-version entry in a shared store falls b
 fresh authoritative fetch. `zA1OnChainData` is exported from `./checks` so you don't have to
 hand-roll the §A.1 discriminated-union schema.
 
+The schema MUST be idempotent over its own output: `set` stores the schema's **output**
+type and `get` re-validates exactly that shape, so transforming schemas whose output no
+longer parses (e.g. `z.string().transform(s => s.length)`) silently turn every hit into a
+miss, and re-applicable transforms would re-run on every read. Pure validation schemas are
+always safe.
+
 ```ts
 import { z } from "zod";
 import { inMemoryCache, type AsyncCache } from "@3flabs/guardian-defaults/cache";

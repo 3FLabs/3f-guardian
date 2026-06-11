@@ -80,6 +80,20 @@ export function isMulticallChunkFailure(e: unknown): boolean {
 }
 
 /**
+ * Normalise an unknown thrown value into a log-safe message with
+ * absolute URLs redacted. viem's transport errors (`HttpRequestError`
+ * and everything that wraps it) embed the RPC URL in their message,
+ * and hosted-provider URLs routinely carry the API key in the path or
+ * query (`https://mainnet.example.com/v2/<key>`). These messages are
+ * only ever logged server-side, but log pipelines are shipped and
+ * retained broadly enough that provider keys don't belong in them.
+ */
+export function sanitizeErr(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  return msg.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"')\]]+/gi, "[redacted-url]");
+}
+
+/**
  * §A.* set-membership predicate. Compares case-insensitively for
  * EVM addresses and case-sensitively for everything else.
  *

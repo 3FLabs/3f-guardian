@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type Address } from "viem";
+import { AbiDecodingZeroDataError, ContractFunctionExecutionError, type Address } from "viem";
 
 import {
   noopLogger,
@@ -8,6 +8,7 @@ import {
   type SigningContext,
 } from "@3flabs/guardian";
 
+import { positionManagerFactoryAbi } from "../src/abi/position-manager-factory.js";
 import { buildIntentSwapChecks, type IntentSwapPolicy } from "../src/checks/intent-swap.js";
 
 const PM_FACTORY = "0xfaC70ffaC70ffaC70ffaC70ffaC70ffaC70ffaC0" as Address;
@@ -34,10 +35,24 @@ function makeClient(responses: ReadonlyArray<readonly unknown[] | Error>): Stub 
   const stub: Stub = { client: undefined as never, multicalls: [] };
   let i = 0;
   const client = {
-    multicall: async (params: { contracts: ReadonlyArray<{ functionName: string }> }) => {
+    multicall: async (params: {
+      contracts: ReadonlyArray<{ functionName: string }>;
+      allowFailure?: boolean;
+    }) => {
       stub.multicalls.push({ functionNames: params.contracts.map((c) => c.functionName) });
       const r = responses[i++];
       if (r === undefined) throw new Error(`unexpected multicall #${i}`);
+      // Mirror viem: under allowFailure (the stage-1 factory read) a
+      // chunk-level failure is never thrown — every slot in the chunk
+      // reports the same error. Stage-1 fixtures are already
+      // slot-wrapped (`factoryReads`). Only without allowFailure (the
+      // stage-2 PM read) does viem throw.
+      if (params.allowFailure === true) {
+        if (r instanceof Error) {
+          return params.contracts.map(() => ({ status: "failure", error: r }));
+        }
+        return r;
+      }
       if (r instanceof Error) throw r;
       return r;
     },
@@ -261,7 +276,70 @@ describe("buildIntentSwapChecks", () => {
   });
 
   it("propagates stage-1 multicall failure as UpstreamUnavailableError", async () => {
+    // Under allowFailure viem fills every slot with the chunk error
+    // (the stub mirrors that) — the runner must classify the all-failure
+    // picture as 503, never as "neither leg is a PM" (422).
     const stub = makeClient([new Error("rpc 503")]);
+    const r = await buildIntentSwapChecks({ policy })(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
+  });
+
+  it("503s on a single transport-failed stage-1 slot instead of deciding the XOR blind", async () => {
+    // legA matched, but legB's slot failed non-deterministically: legB
+    // might also be a PM ("both" → fail). Deciding "exactly one" from
+    // the incomplete picture would be fail-open.
+    const stub = makeClient([
+      [
+        { status: "success", result: true }, // F·legA
+        { status: "failure", error: new Error("slot rpc timeout") }, // F·legB
+      ],
+    ]);
+    const r = await buildIntentSwapChecks({ policy })(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
+  });
+
+  it("treats a deterministically-failing factory as a non-match when another factory answers", async () => {
+    const OTHER_FACTORY = "0x0000000000000000000000000000000000000aaa" as Address;
+    const twoFactoryPolicy: IntentSwapPolicy = {
+      ...policy,
+      acceptedPmFactories: new Map([[1, new Set<string>([PM_FACTORY, OTHER_FACTORY])]]),
+    };
+    const eoaError = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: positionManagerFactoryAbi,
+      functionName: "isPositionManager",
+      args: [PM],
+    });
+    // Slot order: [F1·legA, F2·legA, F1·legB, F2·legB] — F2 is an EOA
+    // in the policy (deterministic failure on both legs); F1 is healthy.
+    const stub = makeClient([
+      [
+        { status: "success", result: true },
+        { status: "failure", error: eoaError },
+        { status: "success", result: false },
+        { status: "failure", error: eoaError },
+      ],
+      pmReads({ totalAssets: 1000n, totalSupply: 1000n, virtualShareOffset: 1n }),
+    ]);
+    const r = await buildIntentSwapChecks({ policy: twoFactoryPolicy })(ctx(stub.client), baseBody);
+    expect(r.isOk()).toBe(true);
+  });
+
+  it("503s when no leg matches and a configured factory deterministically failed", async () => {
+    // Can't distinguish "neither is a PM" (422, client-blamed) from
+    // "the PM's factory is the misconfigured one" — mirror A.1: 503.
+    const eoaError = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: positionManagerFactoryAbi,
+      functionName: "isPositionManager",
+      args: [PM],
+    });
+    const stub = makeClient([
+      [
+        { status: "failure", error: eoaError },
+        { status: "failure", error: eoaError },
+      ],
+    ]);
     const r = await buildIntentSwapChecks({ policy })(ctx(stub.client), baseBody);
     expect(r.isErr()).toBe(true);
     if (r.isErr()) expect(r.error).toBeInstanceOf(UpstreamUnavailableError);

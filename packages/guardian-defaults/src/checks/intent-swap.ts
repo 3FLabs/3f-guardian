@@ -10,7 +10,17 @@ import {
 
 import { positionManagerAbi, VIRTUAL_ASSETS } from "../abi/position-manager.js";
 import { positionManagerFactoryAbi } from "../abi/position-manager-factory.js";
-import { checkDeadline, checkMembership, failed, passed, rollUp, skipped } from "./helpers.js";
+import {
+  checkDeadline,
+  checkMembership,
+  failed,
+  isDeterministicContractCallFailure,
+  isMulticallChunkFailure,
+  passed,
+  rollUp,
+  sanitizeErr,
+  skipped,
+} from "./helpers.js";
 import type { CheckRunner, CheckRunnerError } from "./types.js";
 
 /**
@@ -49,9 +59,16 @@ export type IntentSwapPolicy = {
  *
  * Stage 1 — single multicall (`allowFailure: true`):
  *   For each (leg, factory) pair: `factory.isPositionManager(legAsset)`.
- *   `allowFailure: true` is fine here: a non-existent factory or a
- *   non-contract leg asset just yields `failure` for that slot, which
- *   the runner treats as "not a PM under that factory".
+ *   Failure slots are classified per-slot, mirroring A.1: a
+ *   DETERMINISTIC failure (an operator-configured factory address that
+ *   reverts the view — an EOA or non-factory contract) is logged as a
+ *   configuration alarm and treated as a non-match; any other failure
+ *   (chunk-level aggregate3 transport failure, per-slot RPC error) is
+ *   `UpstreamUnavailableError` (503) — because the rule is an XOR, one
+ *   unknown answer can flip the outcome in either direction, so the
+ *   runner never decides "exactly one" from an incomplete picture. If
+ *   no leg matches and a deterministic failure occurred, 503 (not 422)
+ *   keeps the misconfiguration operator-visible.
  *
  * Stage 2 — single multicall on the resolved PM (`allowFailure: false`):
  *   `pm.owner()`, `pm.assets()`, `pm.pendingFees()`, `pm.virtualShareOffset()`.
@@ -155,8 +172,47 @@ export function buildIntentSwapChecks(deps: {
       })) as never;
     } catch (e) {
       ctx.logger.error(
-        { err: e instanceof Error ? e.message : e, legA: legA.asset, legB: legB.asset },
+        { err: sanitizeErr(e), legA: legA.asset, legB: legB.asset },
         "A.3: stage 1 multicall failed",
+      );
+      return Result.err(
+        new UpstreamUnavailableError({
+          message: "position-manager factory read failed upstream",
+          status: 503,
+        }),
+      );
+    }
+
+    // Classify failure slots BEFORE deciding "exactly one". Under
+    // `allowFailure: true` viem never throws — a chunk-level transport
+    // failure fills EVERY slot with `status: "failure"` — so computing
+    // hits from successes alone would misread an outage as "neither leg
+    // is a PM" (a client-blamed 422). And because the rule is an XOR, a
+    // single transport-failed slot can flip the outcome either way
+    // (e.g. mask "both legs are PMs" as a pass), so ANY
+    // non-deterministic failure is 503, never a guess. A DETERMINISTIC
+    // failure is an operator-configured factory that cannot answer the
+    // view (EOA / non-factory contract): log it loudly and treat the
+    // slot as a non-match, the same stance as A.1.
+    let deterministicFailures = 0;
+    for (const [i, slot] of stage1Results.entries()) {
+      if (slot.status !== "failure") continue;
+      const factory = factoriesArr[i % factoriesArr.length]!;
+      const leg = i < factoriesArr.length ? legA.asset : legB.asset;
+      if (isDeterministicContractCallFailure(slot.error, ["isPositionManager"])) {
+        ctx.logger.error(
+          { err: sanitizeErr(slot.error), factory, leg },
+          "A.3: accepted PM factory did not answer isPositionManager(); " +
+            "check the acceptedPmFactories configuration",
+        );
+        deterministicFailures++;
+        continue;
+      }
+      ctx.logger.error(
+        { err: sanitizeErr(slot.error), factory, leg },
+        isMulticallChunkFailure(slot.error)
+          ? "A.3: stage 1 multicall failed upstream (transport)"
+          : "A.3: factory isPositionManager() read failed upstream (transport)",
       );
       return Result.err(
         new UpstreamUnavailableError({
@@ -174,6 +230,20 @@ export function buildIntentSwapChecks(deps: {
       .some((r) => r.status === "success" && r.result === true);
 
     if (aHits === bHits) {
+      if (!aHits && deterministicFailures > 0) {
+        // Without a definitive answer from every configured factory we
+        // cannot distinguish "neither leg is a PM" (client error) from
+        // "the PM's factory is the one that failed to answer". Mirror
+        // A.1: fail 503 so the misconfiguration stays an
+        // operator-visible alarm instead of a stream of client-blamed
+        // 422s.
+        return Result.err(
+          new UpstreamUnavailableError({
+            message: "position-manager factory read failed upstream",
+            status: 503,
+          }),
+        );
+      }
       // Both PMs or neither — both fail the "exactly one" check.
       const reason = aHits
         ? "both legs resolved as position managers; expected exactly one"
@@ -221,10 +291,7 @@ export function buildIntentSwapChecks(deps: {
       [totalAssets_, totalSupply_, mgmtFeeShares, perfFeeShares] = feesRes;
       virtualShareOffset = virtualRes;
     } catch (e) {
-      ctx.logger.error(
-        { err: e instanceof Error ? e.message : e, pmAsset },
-        "A.3: stage 2 PM read failed",
-      );
+      ctx.logger.error({ err: sanitizeErr(e), pmAsset }, "A.3: stage 2 PM read failed");
       return Result.err(
         new UpstreamUnavailableError({
           message: "position-manager read failed upstream",

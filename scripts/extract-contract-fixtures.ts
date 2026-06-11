@@ -138,11 +138,12 @@ type StampedArtifact = {
  * sources; `markDirty` is uniform within a run, so caching is safe).
  *
  * With `markDirty` (extract mode only), a dirty worktree gets a
- * `-dirty` suffix, mirroring `git describe --dirty`. Side effect on
- * `--check`: a later check from a clean checkout at the same commit
- * flags drift and forces re-extraction from a clean tree — intentional.
- * Check mode itself never appends the marker, so the monorepo's own
- * dirtiness cannot produce false drift.
+ * `-dirty` suffix, mirroring `git describe --dirty`. `--check` treats a
+ * BUNDLED `-dirty` stamp as a hard failure (see `runCheck`): the
+ * marker exists so locally-extracted experiments can never silently
+ * graduate into committed fixtures. Check mode itself never appends
+ * the marker, so the monorepo's own dirtiness cannot produce false
+ * drift.
  */
 const gitHeadCache = new Map<string, string>();
 function gitHead(repoPath: string, opts: { markDirty: boolean }): string {
@@ -313,6 +314,21 @@ async function runCheck(): Promise<void> {
         `[fixtures] INVALID: ${src.name} has mismatched provenance metadata ` +
           `(got ${artifact.name} / ${artifact.sourceRepo} / ${artifact.sourcePath}, ` +
           `expected ${src.name} / ${src.repo} / ${src.sourcePath})`,
+      );
+      failures++;
+      continue;
+    }
+    // A bundled `-dirty` stamp means the artifact was extracted from an
+    // uncommitted worktree — its content is unreproducible from any
+    // commit. The commit-mismatch path below routes dirty-vs-clean to a
+    // NOTICE (not drift), so without this hard failure a dirty artifact
+    // would pass `fixtures:check` forever. Dirty extraction is for
+    // local iteration only; committed artifacts must come from a clean
+    // checkout at the pinned tag.
+    if (artifact.sourceCommitHash.endsWith("-dirty")) {
+      console.error(
+        `[fixtures] INVALID: ${src.name} was extracted from a dirty worktree ` +
+          `(${artifact.sourceCommitHash}) — re-extract from a clean checkout at the pinned tag`,
       );
       failures++;
       continue;

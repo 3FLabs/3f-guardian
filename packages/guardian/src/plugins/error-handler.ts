@@ -54,8 +54,17 @@ export function errorHandlerPlugin(logger: Logger | undefined) {
 
 function toGuardianError(thrown: unknown, code: unknown, log: Logger): GuardianError {
   if (thrown instanceof ValidationError) {
+    // A response-schema failure means the Guardian produced a payload
+    // that violates its own contract — a server bug, not a caller
+    // error. A 400 here would have well-behaved clients retry a
+    // request that can never succeed; surface 500 and log the real
+    // shape mismatch for operators.
+    if (thrown.type === "response") {
+      log.error({ err: thrown.message }, "guardian: response failed its own schema; mapped to 500");
+      return new InternalError({ message: "Unexpected Guardian-side failure" });
+    }
     return new BadRequestError({
-      message: thrown.message,
+      message: sanitizeValidationMessage(thrown),
       details: { schema: thrown.type },
     });
   }
@@ -97,4 +106,35 @@ function toGuardianError(thrown: unknown, code: unknown, log: Logger): GuardianE
     "guardian: unexpected error mapped to 500",
   );
   return new InternalError({ message: "Unexpected Guardian-side failure" });
+}
+
+/**
+ * Elysia's `ValidationError.message` embeds the ENTIRE validated value
+ * under `found` — for the header schema that is every request header,
+ * including `authorization: Bearer <token>` and `x-guardian-signature`.
+ * Auth runs before validation, so it is precisely LIVE credentials that
+ * would be echoed into 400 bodies (and from there into client and proxy
+ * logs). Rebuild the message from the structured issue list — which
+ * only ever references the failing property — and drop the echoed
+ * value entirely. Falls back to a generic message if Elysia changes
+ * its message encoding.
+ */
+function sanitizeValidationMessage(thrown: ValidationError): string {
+  try {
+    const parsed = JSON.parse(thrown.message) as {
+      on?: string;
+      property?: string;
+      message?: string;
+      errors?: ReadonlyArray<{ path?: unknown; message?: string }>;
+    };
+    return JSON.stringify({
+      type: "validation",
+      on: parsed.on,
+      property: parsed.property,
+      message: parsed.message,
+      errors: (parsed.errors ?? []).map((e) => ({ path: e.path, message: e.message })),
+    });
+  } catch {
+    return "Request validation failed";
+  }
 }

@@ -86,6 +86,7 @@ function makeClient(args: {
     fromBlock?: bigint;
     toBlock?: bigint;
   }) => Array<{
+    address: Address;
     eventName: "RolesUpdated" | "RequestCreated";
     blockNumber: bigint;
     logIndex: number;
@@ -184,18 +185,21 @@ describe("buildIntentRequestBindingChecks", () => {
         if (fromBlock !== undefined && fromBlock <= 5_000n && toBlock! >= 5_000n) {
           return [
             {
+              address: FACTORY,
               eventName: "RequestCreated",
               blockNumber: 5_000n,
               logIndex: 0,
               args: { request: RC },
             },
             {
+              address: RC,
               eventName: "RolesUpdated",
               blockNumber: 5_000n,
               logIndex: 1,
               args: { user: PULLER, roles: ROLE_PULLER },
             },
             {
+              address: RC,
               eventName: "RolesUpdated",
               blockNumber: 5_000n,
               logIndex: 2,
@@ -238,14 +242,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[ROGUE_OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -271,8 +283,15 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
@@ -280,12 +299,14 @@ describe("buildIntentRequestBindingChecks", () => {
         },
         {
           // Rogue grant: a non-accepted address gets the puller role later.
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_100n,
           logIndex: 0,
           args: { user: ROGUE, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -336,6 +357,7 @@ describe("buildIntentRequestBindingChecks", () => {
         fromBlock! <= 9_900n && toBlock! >= 9_900n
           ? [
               {
+                address: RC,
                 eventName: "RolesUpdated" as const,
                 blockNumber: 9_900n,
                 logIndex: 0,
@@ -368,6 +390,7 @@ describe("buildIntentRequestBindingChecks", () => {
         fromBlock! <= 9_900n && toBlock! >= 9_900n
           ? [
               {
+                address: RC,
                 eventName: "RolesUpdated" as const,
                 blockNumber: 9_900n,
                 logIndex: 0,
@@ -468,14 +491,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, badFactoryError, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -530,18 +561,21 @@ describe("buildIntentRequestBindingChecks", () => {
         fromBlock! <= 5_000n && toBlock! >= 5_000n
           ? [
               {
+                address: FACTORY,
                 eventName: "RequestCreated" as const,
                 blockNumber: 5_000n,
                 logIndex: 0,
                 args: { request: RC },
               },
               {
+                address: RC,
                 eventName: "RolesUpdated" as const,
                 blockNumber: 5_000n,
                 logIndex: 1,
                 args: { user: PULLER, roles: ROLE_PULLER },
               },
               {
+                address: RC,
                 eventName: "RolesUpdated" as const,
                 blockNumber: 5_000n,
                 logIndex: 2,
@@ -610,26 +644,36 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: ROGUE, roles: ROLE_PULLER }, // initial rogue grant
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_100n,
           logIndex: 0,
           args: { user: ROGUE, roles: 0n }, // revoked
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 3,
@@ -667,14 +711,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -699,14 +751,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, false, true]], // first factory says no, second says yes
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -724,14 +784,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -761,14 +829,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -811,14 +887,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -864,14 +948,22 @@ describe("buildIntentRequestBindingChecks", () => {
       ],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -916,14 +1008,22 @@ describe("buildIntentRequestBindingChecks", () => {
       multicallResponses: [[OWNER, true]],
       latestBlock: 5_500n,
       getLogs: () => [
-        { eventName: "RequestCreated", blockNumber: 5_000n, logIndex: 0, args: { request: RC } },
         {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
         {
+          address: RC,
           eventName: "RolesUpdated",
           blockNumber: 5_000n,
           logIndex: 2,
@@ -998,6 +1098,7 @@ describe("scanRoleHolders", () => {
         fromBlock <= 9_900n && toBlock >= 9_900n
           ? [
               {
+                address: RC,
                 eventName: "RolesUpdated",
                 blockNumber: 9_900n,
                 logIndex: 0,
@@ -1018,6 +1119,87 @@ describe("scanRoleHolders", () => {
     if (outcome.kind === "tooOld") {
       expect(outcome.partialHolders.get(ROGUE)).toBe(ROLE_PULLER);
     }
+  });
+
+  it("ignores RolesUpdated emitted by the factory (wrong-emitter regression)", async () => {
+    // The wire filter is address ∈ {factory, requestContract} × both
+    // topics, so a factory-level RolesUpdated (factories are solady
+    // OwnableRoles contracts too) arrives in the same batch. Replaying
+    // it into the request contract's holder map would let a factory
+    // grant with an overlapping role bit mask an empty holder set.
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        fromBlock <= 5_000n && toBlock >= 5_000n
+          ? [
+              {
+                address: FACTORY,
+                eventName: "RequestCreated",
+                blockNumber: 5_000n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+              {
+                address: FACTORY,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 1,
+                args: { user: ROGUE, roles: ROLE_PULLER },
+              },
+              {
+                address: RC,
+                eventName: "RolesUpdated",
+                blockNumber: 5_000n,
+                logIndex: 2,
+                args: { user: PULLER, roles: ROLE_PULLER },
+              },
+            ]
+          : [],
+    } as unknown as PublicClient;
+    const outcome = await scanRoleHolders({
+      client,
+      factory: FACTORY,
+      requestContract: RC,
+      latestBlock: 5_500n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    expect(outcome.kind).toBe("resolved");
+    if (outcome.kind === "resolved") {
+      expect(outcome.holders.has(ROGUE)).toBe(false);
+      expect(outcome.holders.get(PULLER.toLowerCase() as Address)).toBe(ROLE_PULLER);
+    }
+  });
+
+  it("ignores a RequestCreated not emitted by the scanned factory", async () => {
+    // A foreign contract naming this request contract in a
+    // RequestCreated-shaped event must not count as the deployment
+    // marker — only THIS factory's event proves the scan reached the
+    // contract's origin.
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) =>
+        fromBlock <= 9_900n && toBlock >= 9_900n
+          ? [
+              {
+                address: OTHER_FACTORY,
+                eventName: "RequestCreated",
+                blockNumber: 9_900n,
+                logIndex: 0,
+                args: { request: RC },
+              },
+            ]
+          : [],
+    } as unknown as PublicClient;
+    const outcome = await scanRoleHolders({
+      client,
+      factory: FACTORY,
+      requestContract: RC,
+      latestBlock: 10_000n,
+      blockRange: 1_000n,
+      maxLookbackBlocks: 5_000n,
+    });
+    // Deployment never confirmed — the scan must exhaust the lookback
+    // and report tooOld, not a trusted-complete "resolved".
+    expect(outcome.kind).toBe("tooOld");
   });
 
   it("throws once the wall-clock budget is exhausted between chunks", async () => {
