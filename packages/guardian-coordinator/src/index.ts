@@ -49,13 +49,6 @@ export type GuardianCoordinatorOptions = CoordinatorConnectionConfig & {
   logger?: CoordinatorLogger;
 };
 
-export type RunSummary = {
-  seen: number;
-  submitted: number;
-  skipped: number;
-  failed: number;
-};
-
 type ParsedSigningBody =
   | { kind: "set_request"; body: IntentRequestBindingBody }
   | { kind: "set_fund"; body: IntentFundBindingBody }
@@ -116,10 +109,9 @@ export async function runGuardianCoordinator(options: GuardianCoordinatorOptions
 
 export async function runGuardianCoordinatorOnce(
   options: GuardianCoordinatorOptions,
-): Promise<RunSummary> {
+): Promise<void> {
   const fetcher = options.fetcher ?? fetch;
   const logger = options.logger ?? console;
-  const summary: RunSummary = { seen: 0, submitted: 0, skipped: 0, failed: 0 };
 
   for (let page = 1; ; page++) {
     const url = new URL(`${options.coordinatorBaseUrl}/v1/guardian/signing-requests`);
@@ -132,11 +124,9 @@ export async function runGuardianCoordinatorOnce(
         headers: { "x-api-key": options.coordinatorApiKey },
       }),
     );
-    summary.seen += requests.items.length;
 
     for (const request of requests.items) {
       if (request.mySubmission !== null) {
-        summary.skipped++;
         continue;
       }
 
@@ -154,7 +144,6 @@ export async function runGuardianCoordinatorOnce(
           (options.chainIds && !options.chainIds.has(parsed.body.chainId)) ||
           (options.facilities && !options.facilities.has(parsed.body.facility.toLowerCase()))
         ) {
-          summary.skipped++;
           continue;
         }
 
@@ -171,10 +160,8 @@ export async function runGuardianCoordinatorOnce(
             body: JSON.stringify({ chainId: parsed.body.chainId, signature: signed.signature }),
           },
         );
-        summary.submitted++;
         logger.log(`submitted guardian signature for ${request.id}`);
       } catch (error) {
-        summary.failed++;
         logger.error(
           `failed guardian signing request ${request.id}: ${
             error instanceof Error ? error.message : String(error)
@@ -185,8 +172,6 @@ export async function runGuardianCoordinatorOnce(
 
     if (requests.items.length === 0 || page * requests.pageSize >= requests.total) break;
   }
-
-  return summary;
 }
 
 async function signWithGuardian(

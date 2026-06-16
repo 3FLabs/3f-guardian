@@ -82,12 +82,7 @@ describe("guardian coordinator", () => {
       throw new Error(`unexpected call ${url}`);
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
-      seen: 1,
-      submitted: 1,
-      skipped: 0,
-      failed: 0,
-    });
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
     expect(signCalls).toHaveLength(1);
     expect(submitBodies).toEqual([{ chainId: 1, signature: SIGNATURE }]);
   });
@@ -158,15 +153,18 @@ describe("guardian coordinator", () => {
       return json({ status: "accepted", quorumReached: true, submissionCount: 1 });
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toMatchObject({
-      submitted: 3,
-      failed: 0,
-    });
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
     expect(seen).toEqual(["set_request", "set_fund", "swap"]);
   });
 
   it("skips rows this guardian already handled", async () => {
-    const options = optionsFor();
+    const signCalls: unknown[] = [];
+    const options = optionsFor({
+      signIntentRequestBinding: async () => {
+        signCalls.push("called");
+        return Result.ok(SIGNING_SUCCESS);
+      },
+    });
     options.fetcher = async (input) => {
       expect(String(input)).toContain("/v1/guardian/signing-requests?");
       return json({
@@ -177,12 +175,8 @@ describe("guardian coordinator", () => {
       });
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
-      seen: 1,
-      submitted: 0,
-      skipped: 1,
-      failed: 0,
-    });
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    expect(signCalls).toHaveLength(0);
   });
 
   it("does not submit when the signer returns a different payloadHash", async () => {
@@ -200,12 +194,7 @@ describe("guardian coordinator", () => {
       throw new Error(`unexpected call ${url}`);
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
-      seen: 1,
-      submitted: 0,
-      skipped: 0,
-      failed: 1,
-    });
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
     expect(calls).toHaveLength(1);
   });
 
@@ -232,12 +221,7 @@ describe("guardian coordinator", () => {
       throw new Error(`unexpected call ${url}`);
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
-      seen: 1,
-      submitted: 0,
-      skipped: 0,
-      failed: 1,
-    });
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
     expect(signCalls).toHaveLength(0);
     expect(calls).toHaveLength(1);
   });
