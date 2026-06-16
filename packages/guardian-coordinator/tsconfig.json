@@ -4,7 +4,8 @@
     "noEmit": true,
     "types": ["bun"],
     "paths": {
-      "@3flabs/guardian": ["../guardian/src/index.ts"]
+      "@3flabs/guardian": ["../guardian/src/index.ts"],
+      "@3flabs/guardian-defaults": ["../guardian-defaults/src/index.ts"]
     }
   },
   "include": ["src/**/*", "tests/**/*", "vitest.config.ts"]

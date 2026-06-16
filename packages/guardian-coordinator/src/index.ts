@@ -75,7 +75,7 @@ const zSigningRequestPage = z.object({
   total: z.number(),
   page: z.number(),
   pageSize: z.number(),
-  items: z.array(zSigningRequest),
+  items: z.array(z.unknown()),
 });
 
 export type SigningRequest = z.infer<typeof zSigningRequest>;
@@ -113,64 +113,75 @@ export async function runGuardianCoordinatorOnce(
   const fetcher = options.fetcher ?? fetch;
   const logger = options.logger ?? console;
 
-  for (let page = 1; ; page++) {
-    const url = new URL(`${options.coordinatorBaseUrl}/v1/guardian/signing-requests`);
-    url.searchParams.set("status", "open");
-    url.searchParams.set("page", String(page));
-    url.searchParams.set("pageSize", String(options.pageSize));
+  for (const filter of pollFilters(options)) {
+    for (let page = 1; ; page++) {
+      const url = new URL(`${options.coordinatorBaseUrl}/v1/guardian/signing-requests`);
+      url.searchParams.set("status", "open");
+      url.searchParams.set("page", String(page));
+      url.searchParams.set("pageSize", String(options.pageSize));
+      if (filter.chainId !== undefined) url.searchParams.set("chainId", String(filter.chainId));
+      if (filter.facility !== undefined) url.searchParams.set("facility", filter.facility);
 
-    const requests = zSigningRequestPage.parse(
-      await requestJson(fetcher, "GET", url.toString(), {
-        headers: { "x-api-key": options.coordinatorApiKey },
-      }),
-    );
+      const requests = zSigningRequestPage.parse(
+        await requestJson(fetcher, "GET", url.toString(), {
+          headers: { "x-api-key": options.coordinatorApiKey },
+        }),
+      );
 
-    for (const request of requests.items) {
-      if (request.mySubmission !== null) {
-        continue;
-      }
-
-      try {
-        const parsed = parseSigningBody(request);
-        if (request.chainId !== parsed.body.chainId) {
-          throw new Error(`chainId mismatch: request ${request.chainId}, body ${parsed.body.chainId}`);
+      for (const item of requests.items) {
+        const row = zSigningRequest.safeParse(item);
+        if (!row.success) {
+          logger.error(`skipping malformed guardian signing request: ${row.error.message}`);
+          continue;
         }
-        if (request.facility.toLowerCase() !== parsed.body.facility.toLowerCase()) {
-          throw new Error(
-            `facility mismatch: request ${request.facility}, body ${parsed.body.facility}`,
-          );
-        }
-        if (
-          (options.chainIds && !options.chainIds.has(parsed.body.chainId)) ||
-          (options.facilities && !options.facilities.has(parsed.body.facility.toLowerCase()))
-        ) {
+        const request = row.data;
+
+        if (request.mySubmission !== null) {
           continue;
         }
 
-        const signed = await signWithGuardian(options.guardian, request, parsed);
-        await requestJson(
-          fetcher,
-          "PUT",
-          `${options.coordinatorBaseUrl}/v1/guardian/signing-requests/${request.id}/submission`,
-          {
-            headers: {
-              "content-type": "application/json",
-              "x-api-key": options.coordinatorApiKey,
-            },
-            body: JSON.stringify({ chainId: parsed.body.chainId, signature: signed.signature }),
-          },
-        );
-        logger.log(`submitted guardian signature for ${request.id}`);
-      } catch (error) {
-        logger.error(
-          `failed guardian signing request ${request.id}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-    }
+        try {
+          const parsed = parseSigningBody(request);
+          if (request.chainId !== parsed.body.chainId) {
+            throw new Error(`chainId mismatch: request ${request.chainId}, body ${parsed.body.chainId}`);
+          }
+          if (request.facility.toLowerCase() !== parsed.body.facility.toLowerCase()) {
+            throw new Error(
+              `facility mismatch: request ${request.facility}, body ${parsed.body.facility}`,
+            );
+          }
+          if (
+            (options.chainIds && !options.chainIds.has(parsed.body.chainId)) ||
+            (options.facilities && !options.facilities.has(parsed.body.facility.toLowerCase()))
+          ) {
+            continue;
+          }
 
-    if (requests.items.length === 0 || page * requests.pageSize >= requests.total) break;
+          const signed = await signWithGuardian(options.guardian, request, parsed);
+          await requestJson(
+            fetcher,
+            "PUT",
+            `${options.coordinatorBaseUrl}/v1/guardian/signing-requests/${request.id}/submission`,
+            {
+              headers: {
+                "content-type": "application/json",
+                "x-api-key": options.coordinatorApiKey,
+              },
+              body: JSON.stringify({ chainId: parsed.body.chainId, signature: signed.signature }),
+            },
+          );
+          logger.log(`submitted guardian signature for ${request.id}`);
+        } catch (error) {
+          logger.error(
+            `failed guardian signing request ${request.id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+
+      if (requests.items.length === 0 || page * requests.pageSize >= requests.total) break;
+    }
   }
 }
 
@@ -284,22 +295,37 @@ async function requestJson(
   return body;
 }
 
-function required(env: Record<string, string | undefined>, key: string): string {
+export function required(env: Record<string, string | undefined>, key: string): string {
   const value = env[key]?.trim();
   if (!value) throw new Error(`${key} is required`);
   return value;
 }
 
 function baseUrl(value: string): string {
-  return new URL(value).toString().replace(/\/+$/, "");
+  const url = new URL(value);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url.hostname))) {
+    throw new Error("COORDINATOR_BASE_URL must use https unless it points at localhost");
+  }
+  return url.toString().replace(/\/+$/, "");
 }
 
-function positiveInt(value: string | undefined, fallback: number): number {
-  if (!value) return fallback;
-  const parsed = Number(value);
+export function positiveInt(value: string | undefined, fallback: number): number {
+  const raw = value?.trim() || String(fallback);
+  const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed <= 0)
-    throw new Error(`expected positive integer: ${value}`);
+    throw new Error(`expected positive integer: ${raw}`);
   return parsed;
+}
+
+function pollFilters(options: GuardianCoordinatorOptions): Array<{ chainId?: number; facility?: string }> {
+  const chainIds = options.chainIds ? [...options.chainIds] : [undefined];
+  const facilities = options.facilities ? [...options.facilities] : [undefined];
+  return chainIds.flatMap((chainId) => facilities.map((facility) => ({ chainId, facility })));
+}
+
+function isLoopback(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost" || host.endsWith(".localhost") || host === "::1" || host.startsWith("127.");
 }
 
 function numberSet(value: string | undefined): Set<number> | undefined {

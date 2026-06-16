@@ -11,6 +11,7 @@ import { buildGuardianFromEnv as buildCliGuardianFromEnv } from "../src/cli.js";
 
 const REQUEST_ID = "550e8400-e29b-41d4-a716-446655440000";
 const FACILITY = "0x2222222222222222222222222222222222222222";
+const OTHER_FACILITY = "0x9999999999999999999999999999999999999999";
 const GUARDIAN = "0x0000000000000000000000000000000000000001";
 const HASH = `0x${"b".repeat(64)}` as `0x${string}`;
 const OTHER_HASH = `0x${"c".repeat(64)}` as `0x${string}`;
@@ -157,6 +158,69 @@ describe("guardian coordinator", () => {
     expect(seen).toEqual(["set_request", "set_fund", "swap"]);
   });
 
+  it("skips malformed rows without dropping valid rows in the same page", async () => {
+    const errors: string[] = [];
+    const signCalls: string[] = [];
+    const submitBodies: unknown[] = [];
+    const options = optionsFor({
+      signIntentRequestBinding: async () => {
+        signCalls.push("called");
+        return Result.ok(SIGNING_SUCCESS);
+      },
+    });
+    options.logger = {
+      log() {},
+      error(message) {
+        errors.push(String(message));
+      },
+    };
+    options.fetcher = async (input, init) => {
+      const url = String(input);
+      if (url.startsWith("http://coordinator.test/v1/guardian/signing-requests?")) {
+        return json({
+          total: 2,
+          page: 1,
+          pageSize: 100,
+          items: [{ ...SIGNING_REQUEST, kind: "unknown" }, SIGNING_REQUEST],
+        });
+      }
+      if (url === `http://coordinator.test/v1/guardian/signing-requests/${REQUEST_ID}/submission`) {
+        submitBodies.push(JSON.parse(String(init?.body)));
+        return json({ status: "accepted", quorumReached: true, submissionCount: 1 });
+      }
+      throw new Error(`unexpected call ${url}`);
+    };
+
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    expect(errors.some((message) => message.includes("skipping malformed"))).toBe(true);
+    expect(signCalls).toHaveLength(1);
+    expect(submitBodies).toEqual([{ chainId: 1, signature: SIGNATURE }]);
+  });
+
+  it("sends configured chain and facility filters to grunt-api", async () => {
+    const urls: string[] = [];
+    const options = optionsFor();
+    options.chainIds = new Set([1, 8453]);
+    options.facilities = new Set([FACILITY, OTHER_FACILITY]);
+    options.fetcher = async (input) => {
+      urls.push(String(input));
+      return json({ total: 0, page: 1, pageSize: 100, items: [] });
+    };
+
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    expect(
+      urls.map((url) => {
+        const params = new URL(url).searchParams;
+        return { chainId: params.get("chainId"), facility: params.get("facility") };
+      }),
+    ).toEqual([
+      { chainId: "1", facility: FACILITY },
+      { chainId: "1", facility: OTHER_FACILITY },
+      { chainId: "8453", facility: FACILITY },
+      { chainId: "8453", facility: OTHER_FACILITY },
+    ]);
+  });
+
   it("skips rows this guardian already handled", async () => {
     const signCalls: unknown[] = [];
     const options = optionsFor({
@@ -229,22 +293,38 @@ describe("guardian coordinator", () => {
   it("loads the coordinator env config", () => {
     expect(
       loadCoordinatorConfig({
-        COORDINATOR_BASE_URL: "http://coordinator.test/",
+        COORDINATOR_BASE_URL: "https://coordinator.test/",
         COORDINATOR_API_KEY: "guardian-key",
         CHAIN_IDS: "1,8453",
         FACILITIES: FACILITY,
       }),
     ).toMatchObject({
-      coordinatorBaseUrl: "http://coordinator.test",
+      coordinatorBaseUrl: "https://coordinator.test",
       chainIds: new Set([1, 8453]),
       facilities: new Set([FACILITY]),
     });
+  });
+
+  it("rejects non-local http coordinator URLs", () => {
+    expect(() =>
+      loadCoordinatorConfig({
+        COORDINATOR_BASE_URL: "http://coordinator.test/",
+        COORDINATOR_API_KEY: "guardian-key",
+      }),
+    ).toThrow(/https/);
+    expect(
+      loadCoordinatorConfig({
+        COORDINATOR_BASE_URL: "http://localhost:3000/",
+        COORDINATOR_API_KEY: "guardian-key",
+      }).coordinatorBaseUrl,
+    ).toBe("http://localhost:3000");
   });
 
   it("builds the runnable guardian from env", () => {
     const guardian = buildCliGuardianFromEnv({
       ...CLI_ENV,
       GUARDIAN_SIGNER_KEY: `0x${"11".repeat(32)}`,
+      GUARDIAN_SWAP_PRICE_TOLERANCE_BPS: "0",
     });
 
     expect(guardian.metadata.supportedChains).toEqual([1]);

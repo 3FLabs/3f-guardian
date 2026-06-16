@@ -20,6 +20,8 @@ import {
 
 import {
   loadCoordinatorConfig,
+  positiveInt,
+  required,
   runGuardianCoordinator,
   type CoordinatorGuardian,
 } from "./index.js";
@@ -118,7 +120,7 @@ export function buildGuardianFromEnv(
             required(env, "GUARDIAN_PM_OWNERS"),
             "GUARDIAN_PM_OWNERS",
           ),
-          swapPriceToleranceBps: positiveInt(
+          swapPriceToleranceBps: nonNegativeInt(
             env.GUARDIAN_SWAP_PRICE_TOLERANCE_BPS,
             DEFAULT_SWAP_PRICE_TOLERANCE_BPS,
           ),
@@ -182,24 +184,18 @@ function parseAddressMap(value: string, name: string): Map<number, Set<string>> 
   return map;
 }
 
-function required(env: Record<string, string | undefined>, key: string): string {
-  const value = env[key]?.trim();
-  if (!value) throw new Error(`${key} is required`);
-  return value;
-}
-
-function positiveInt(value: string | undefined, fallback: number): number {
-  if (!value) return fallback;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0)
-    throw new Error(`expected positive integer: ${value}`);
-  return parsed;
-}
-
 function positiveBigInt(value: string | undefined, fallback: bigint): bigint {
   if (!value) return fallback;
   const parsed = BigInt(value);
   if (parsed <= 0n) throw new Error(`expected positive bigint: ${value}`);
+  return parsed;
+}
+
+function nonNegativeInt(value: string | undefined, fallback: number): number {
+  const raw = value?.trim() || String(fallback);
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0)
+    throw new Error(`expected non-negative integer: ${raw}`);
   return parsed;
 }
 

@@ -17,7 +17,7 @@ guardian-coordinator
 
 Required env:
 
-- `COORDINATOR_BASE_URL`
+- `COORDINATOR_BASE_URL` (`https://`, or `http://localhost` for local dev)
 - `COORDINATOR_API_KEY`
 - `GUARDIAN_SIGNER_KEY`
 - `GUARDIAN_CHAIN_RPC_URLS` as `chainId=url,chainId=url`
@@ -34,8 +34,8 @@ Optional env:
 
 - `POLL_INTERVAL_MS` default `5000`
 - `PAGE_SIZE` default `100`
-- `CHAIN_IDS` comma-separated coordinator filter
-- `FACILITIES` comma-separated coordinator filter
+- `CHAIN_IDS` comma-separated signing-request filter
+- `FACILITIES` comma-separated signing-request filter
 - `GUARDIAN_MAX_DEADLINE_SECONDS_AHEAD` default `600`
 - `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` default `10000`
 - `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` default `1000000`

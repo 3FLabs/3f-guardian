@@ -12,6 +12,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@3flabs/guardian": fileURLToPath(new URL("../guardian/src/index.ts", import.meta.url)),
+      "@3flabs/guardian-defaults": fileURLToPath(
+        new URL("../guardian-defaults/src/index.ts", import.meta.url),
+      ),
     },
   },
 });
