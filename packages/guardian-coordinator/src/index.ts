@@ -64,12 +64,10 @@ const zSigningRequest = z
     body: z.unknown(),
     mySubmission: z.unknown().nullable().optional(),
   })
-  .transform(
-    (request) => ({
-      ...request,
-      mySubmission: request.mySubmission ?? null,
-    }),
-  );
+  .transform((request) => ({
+    ...request,
+    mySubmission: request.mySubmission ?? null,
+  }));
 
 const zSigningRequestPage = z.object({
   total: z.number(),
@@ -143,7 +141,9 @@ export async function runGuardianCoordinatorOnce(
         try {
           const parsed = parseSigningBody(request);
           if (request.chainId !== parsed.body.chainId) {
-            throw new Error(`chainId mismatch: request ${request.chainId}, body ${parsed.body.chainId}`);
+            throw new Error(
+              `chainId mismatch: request ${request.chainId}, body ${parsed.body.chainId}`,
+            );
           }
           if (request.facility.toLowerCase() !== parsed.body.facility.toLowerCase()) {
             throw new Error(
@@ -317,15 +317,19 @@ export function positiveInt(value: string | undefined, fallback: number): number
   return parsed;
 }
 
-function pollFilters(options: GuardianCoordinatorOptions): Array<{ chainId?: number; facility?: string }> {
-  const chainIds = options.chainIds ? [...options.chainIds] : [undefined];
-  const facilities = options.facilities ? [...options.facilities] : [undefined];
+function pollFilters(
+  options: GuardianCoordinatorOptions,
+): Array<{ chainId?: number; facility?: string }> {
+  const chainIds = options.chainIds?.size ? [...options.chainIds] : [undefined];
+  const facilities = options.facilities?.size ? [...options.facilities] : [undefined];
   return chainIds.flatMap((chainId) => facilities.map((facility) => ({ chainId, facility })));
 }
 
 function isLoopback(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  return host === "localhost" || host.endsWith(".localhost") || host === "::1" || host.startsWith("127.");
+  return (
+    host === "localhost" || host.endsWith(".localhost") || host === "::1" || host.startsWith("127.")
+  );
 }
 
 function numberSet(value: string | undefined): Set<number> | undefined {
@@ -341,12 +345,12 @@ function numberSet(value: string | undefined): Set<number> | undefined {
 
 function stringSet(value: string | undefined): Set<string> | undefined {
   if (!value?.trim()) return undefined;
-  return new Set(
-    value
-      .split(",")
-      .map((part) => part.trim().toLowerCase())
-      .filter(Boolean),
-  );
+  const parsed = value
+    .split(",")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  if (parsed.length === 0) return undefined;
+  return new Set(parsed);
 }
 
 function sleep(ms: number): Promise<void> {

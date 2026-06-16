@@ -221,6 +221,23 @@ describe("guardian coordinator", () => {
     ]);
   });
 
+  it("treats empty filter sets as absent", async () => {
+    const urls: string[] = [];
+    const options = optionsFor();
+    options.chainIds = new Set();
+    options.facilities = new Set();
+    options.fetcher = async (input) => {
+      urls.push(String(input));
+      return json({ total: 0, page: 1, pageSize: 100, items: [] });
+    };
+
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    expect(urls).toHaveLength(1);
+    const params = new URL(urls[0]!).searchParams;
+    expect(params.has("chainId")).toBe(false);
+    expect(params.has("facility")).toBe(false);
+  });
+
   it("skips rows this guardian already handled", async () => {
     const signCalls: unknown[] = [];
     const options = optionsFor({
@@ -305,6 +322,18 @@ describe("guardian coordinator", () => {
     });
   });
 
+  it("ignores empty comma-only coordinator filters", () => {
+    const config = loadCoordinatorConfig({
+      COORDINATOR_BASE_URL: "https://coordinator.test/",
+      COORDINATOR_API_KEY: "guardian-key",
+      CHAIN_IDS: ",",
+      FACILITIES: ",",
+    });
+
+    expect(config.chainIds).toBeUndefined();
+    expect(config.facilities).toBeUndefined();
+  });
+
   it("rejects non-local http coordinator URLs", () => {
     expect(() =>
       loadCoordinatorConfig({
@@ -337,6 +366,16 @@ describe("guardian coordinator", () => {
       "0xca11bde05977b3631167028862be2a173976ca11",
     );
     expect(guardian.getChainClient(2).isErr()).toBe(true);
+  });
+
+  it("rejects checksum-invalid allowlist addresses", () => {
+    expect(() =>
+      buildCliGuardianFromEnv({
+        ...CLI_ENV,
+        GUARDIAN_SIGNER_KEY: `0x${"11".repeat(32)}`,
+        GUARDIAN_REQUEST_FACTORIES: "1=0x52908400098527886E0F7030069857D2E4169Ee7",
+      }),
+    ).toThrow(/invalid address/);
   });
 });
 

@@ -2,7 +2,14 @@
 import { pathToFileURL } from "node:url";
 
 import { Result } from "better-result";
-import { createPublicClient, defineChain, http, isAddress, type Hex, type PublicClient } from "viem";
+import {
+  createPublicClient,
+  defineChain,
+  http,
+  isAddress,
+  type Hex,
+  type PublicClient,
+} from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import {
@@ -166,16 +173,14 @@ function parseAddressMap(value: string, name: string): Map<number, Set<string>> 
     if (!item.trim()) continue;
     const [rawChainId, rawAddresses] = item.split("=");
     const chainId = positiveInt(rawChainId?.trim(), 0);
-    const addresses = new Set(
-      (rawAddresses ?? "")
-        .split(",")
-        .map((address) => address.trim().toLowerCase())
-        .filter(Boolean),
-    );
-    for (const address of addresses) {
-      if (!isAddress(address, { strict: false })) {
+    const addresses = new Set<string>();
+    for (const rawAddress of (rawAddresses ?? "").split(",")) {
+      const address = rawAddress.trim();
+      if (!address) continue;
+      if (!isAddress(address)) {
         throw new Error(`${name} contains invalid address ${address}`);
       }
+      addresses.add(address.toLowerCase());
     }
     if (addresses.size === 0) throw new Error(`${name} has no addresses for chain ${chainId}`);
     map.set(chainId, addresses);
