@@ -2,9 +2,8 @@
 import { pathToFileURL } from "node:url";
 
 import { Result } from "better-result";
-import { createPublicClient, http, isAddress, type Hex, type PublicClient } from "viem";
+import { createPublicClient, defineChain, http, isAddress, type Hex, type PublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { z } from "zod";
 
 import {
   makeSignIntentFundBinding,
@@ -17,9 +16,6 @@ import {
   buildIntentFundBindingChecks,
   buildIntentRequestBindingChecks,
   buildIntentSwapChecks,
-  inMemoryCache,
-  pinoLogger,
-  zA1OnChainData,
 } from "@3flabs/guardian-defaults";
 
 import {
@@ -32,6 +28,7 @@ const DEFAULT_MAX_DEADLINE_SECONDS_AHEAD = 600;
 const DEFAULT_EVENT_SCAN_BLOCK_RANGE = 10_000n;
 const DEFAULT_EVENT_SCAN_MAX_LOOKBACK_BLOCKS = 1_000_000n;
 const DEFAULT_SWAP_PRICE_TOLERANCE_BPS = 1;
+const MULTICALL3_ADDRESS = "0xca11bde05977b3631167028862be2a173976ca11";
 
 export function buildGuardianFromEnv(
   env: Record<string, string | undefined> = process.env,
@@ -40,15 +37,6 @@ export function buildGuardianFromEnv(
   const guardianSigner = privateKeyToAccount(privateKey).address;
   const clients = parseRpcClients(required(env, "GUARDIAN_CHAIN_RPC_URLS"));
   const supportedChains = [...clients.keys()].sort((a, b) => a - b);
-
-  const eip712DomainCache = inMemoryCache(z.object({ name: z.string(), version: z.string() }), {
-    defaultTtlMs: 24 * 60 * 60_000,
-    maxEntries: 256,
-  });
-  const a1OnChainCache = inMemoryCache(zA1OnChainData, {
-    defaultTtlMs: 5 * 60_000,
-    maxEntries: 1024,
-  });
 
   const maxDeadlineSecondsAhead = positiveInt(
     env.GUARDIAN_MAX_DEADLINE_SECONDS_AHEAD,
@@ -61,10 +49,6 @@ export function buildGuardianFromEnv(
       guardianSigner,
       supportedChains,
     },
-    logger: pinoLogger({
-      pretty: env.NODE_ENV !== "production",
-      bindings: { service: "guardian-coordinator" },
-    }),
     getChainClient: (chainId) => {
       const client = clients.get(chainId);
       return client
@@ -103,10 +87,8 @@ export function buildGuardianFromEnv(
             DEFAULT_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
           ),
         },
-        cache: a1OnChainCache,
       }),
       guardianSigner,
-      cache: eip712DomainCache,
     }),
     signIntentFundBinding: makeSignIntentFundBinding({
       checks: buildIntentFundBindingChecks({
@@ -123,7 +105,6 @@ export function buildGuardianFromEnv(
         },
       }),
       guardianSigner,
-      cache: eip712DomainCache,
     }),
     signIntentSwap: makeSignIntentSwap({
       checks: buildIntentSwapChecks({
@@ -144,7 +125,6 @@ export function buildGuardianFromEnv(
         },
       }),
       guardianSigner,
-      cache: eip712DomainCache,
     }),
   };
 }
@@ -156,10 +136,26 @@ function parseRpcClients(value: string): Map<number, PublicClient> {
     const chainId = positiveInt(rawChainId?.trim(), 0);
     const url = rawUrlParts.join("=").trim();
     if (!url) throw new Error(`invalid GUARDIAN_CHAIN_RPC_URLS entry: ${item}`);
-    entries.set(chainId, createPublicClient({ transport: http(url) }) as PublicClient);
+    entries.set(
+      chainId,
+      createPublicClient({
+        chain: defineCoordinatorChain(chainId, url),
+        transport: http(url),
+      }) as PublicClient,
+    );
   }
   if (entries.size === 0) throw new Error("GUARDIAN_CHAIN_RPC_URLS must not be empty");
   return entries;
+}
+
+function defineCoordinatorChain(chainId: number, rpcUrl: string) {
+  return defineChain({
+    id: chainId,
+    name: `Chain ${chainId}`,
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    rpcUrls: { default: { http: [rpcUrl] } },
+    contracts: { multicall3: { address: MULTICALL3_ADDRESS } },
+  });
 }
 
 function parseAddressMap(value: string, name: string): Map<number, Set<string>> {

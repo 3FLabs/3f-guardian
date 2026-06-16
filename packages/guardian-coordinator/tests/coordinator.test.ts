@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { Result } from "better-result";
+import type { SigningSuccess } from "@3flabs/guardian";
 
 import {
   loadCoordinatorConfig,
@@ -10,9 +12,9 @@ import { buildGuardianFromEnv as buildCliGuardianFromEnv } from "../src/cli.js";
 const REQUEST_ID = "550e8400-e29b-41d4-a716-446655440000";
 const FACILITY = "0x2222222222222222222222222222222222222222";
 const GUARDIAN = "0x0000000000000000000000000000000000000001";
-const HASH = `0x${"b".repeat(64)}`;
-const OTHER_HASH = `0x${"c".repeat(64)}`;
-const SIGNATURE = `0x${"a".repeat(130)}`;
+const HASH = `0x${"b".repeat(64)}` as `0x${string}`;
+const OTHER_HASH = `0x${"c".repeat(64)}` as `0x${string}`;
+const SIGNATURE = `0x${"a".repeat(130)}` as `0x${string}`;
 
 const REQUEST_BODY = {
   chainId: 1,
@@ -38,7 +40,7 @@ const SIGNING_SUCCESS = {
   payloadHash: HASH,
   signedAt: "2026-04-22T10:15:00Z",
   checks: [],
-};
+} satisfies SigningSuccess;
 
 const quiet = {
   log() {},
@@ -56,7 +58,7 @@ describe("guardian coordinator", () => {
         expect(ctx.tokenId).toBe("guardian-coordinator");
         expect(ctx.signal).toBeInstanceOf(AbortSignal);
         expect(body).toEqual(REQUEST_BODY);
-        return ok(SIGNING_SUCCESS);
+        return Result.ok(SIGNING_SUCCESS);
       },
     });
 
@@ -95,15 +97,15 @@ describe("guardian coordinator", () => {
     const options = optionsFor({
       signIntentRequestBinding: async () => {
         seen.push("set_request");
-        return ok(SIGNING_SUCCESS);
+        return Result.ok(SIGNING_SUCCESS);
       },
       signIntentFundBinding: async () => {
         seen.push("set_fund");
-        return ok(SIGNING_SUCCESS);
+        return Result.ok(SIGNING_SUCCESS);
       },
       signIntentSwap: async () => {
         seen.push("swap");
-        return ok(SIGNING_SUCCESS);
+        return Result.ok(SIGNING_SUCCESS);
       },
     });
     options.fetcher = async (input) => {
@@ -186,7 +188,8 @@ describe("guardian coordinator", () => {
   it("does not submit when the signer returns a different payloadHash", async () => {
     const calls: string[] = [];
     const options = optionsFor({
-      signIntentRequestBinding: async () => ok({ ...SIGNING_SUCCESS, payloadHash: OTHER_HASH }),
+      signIntentRequestBinding: async () =>
+        Result.ok({ ...SIGNING_SUCCESS, payloadHash: OTHER_HASH }),
     });
     options.fetcher = async (input) => {
       const url = String(input);
@@ -203,6 +206,39 @@ describe("guardian coordinator", () => {
       skipped: 0,
       failed: 1,
     });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("rejects coordinator metadata that does not match the signed body", async () => {
+    const signCalls: unknown[] = [];
+    const options = optionsFor({
+      signIntentRequestBinding: async () => {
+        signCalls.push("called");
+        return Result.ok(SIGNING_SUCCESS);
+      },
+    });
+    const calls: string[] = [];
+    options.fetcher = async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.startsWith("http://coordinator.test/v1/guardian/signing-requests?")) {
+        return json({
+          total: 1,
+          page: 1,
+          pageSize: 100,
+          items: [{ ...SIGNING_REQUEST, chainId: 2 }],
+        });
+      }
+      throw new Error(`unexpected call ${url}`);
+    };
+
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      seen: 1,
+      submitted: 0,
+      skipped: 0,
+      failed: 1,
+    });
+    expect(signCalls).toHaveLength(0);
     expect(calls).toHaveLength(1);
   });
 
@@ -229,7 +265,13 @@ describe("guardian coordinator", () => {
 
     expect(guardian.metadata.supportedChains).toEqual([1]);
     expect(guardian.metadata.guardianSigner).toMatch(/^0x[0-9a-fA-F]{40}$/);
-    expect(guardian.getChainClient(1).isErr()).toBe(false);
+    const client = guardian.getChainClient(1);
+    expect(client.isErr()).toBe(false);
+    if (client.isErr()) throw client.error;
+    expect(client.value.chain?.id).toBe(1);
+    expect(client.value.chain?.contracts?.multicall3?.address).toBe(
+      "0xca11bde05977b3631167028862be2a173976ca11",
+    );
     expect(guardian.getChainClient(2).isErr()).toBe(true);
   });
 });
@@ -262,21 +304,14 @@ function optionsFor(
         guardianSigner: GUARDIAN,
         supportedChains: [1],
       },
-      getChainClient: () => ok({} as never),
-      signTypedData: async () => ok(SIGNATURE),
-      signIntentRequestBinding: async () => ok(SIGNING_SUCCESS),
-      signIntentFundBinding: async () => ok(SIGNING_SUCCESS),
-      signIntentSwap: async () => ok(SIGNING_SUCCESS),
+      getChainClient: () => Result.ok({} as never),
+      signTypedData: async () => Result.ok(SIGNATURE),
+      signIntentRequestBinding: async () => Result.ok(SIGNING_SUCCESS),
+      signIntentFundBinding: async () => Result.ok(SIGNING_SUCCESS),
+      signIntentSwap: async () => Result.ok(SIGNING_SUCCESS),
       ...guardianOverrides,
     },
   };
-}
-
-function ok<T>(value: T) {
-  return {
-    isErr: () => false,
-    value,
-  } as never;
 }
 
 function json(body: unknown, status = 200): Response {

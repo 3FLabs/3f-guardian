@@ -1,0 +1,34 @@
+FROM oven/bun:1.3.14-alpine AS build
+WORKDIR /app
+
+COPY package.json bun.lock tsconfig.base.json ./
+COPY packages/guardian/package.json packages/guardian/package.json
+COPY packages/guardian-defaults/package.json packages/guardian-defaults/package.json
+COPY packages/guardian-coordinator/package.json packages/guardian-coordinator/package.json
+COPY packages/guardian-test-fixtures/package.json packages/guardian-test-fixtures/package.json
+RUN bun install --frozen-lockfile
+
+COPY packages/guardian packages/guardian
+COPY packages/guardian-defaults packages/guardian-defaults
+COPY packages/guardian-coordinator packages/guardian-coordinator
+RUN bun run --cwd packages/guardian build \
+  && bun run --cwd packages/guardian-defaults build \
+  && bun run --cwd packages/guardian-coordinator build
+
+FROM oven/bun:1.3.14-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package.json bun.lock ./
+COPY packages/guardian/package.json packages/guardian/package.json
+COPY packages/guardian-defaults/package.json packages/guardian-defaults/package.json
+COPY packages/guardian-coordinator/package.json packages/guardian-coordinator/package.json
+COPY packages/guardian-test-fixtures/package.json packages/guardian-test-fixtures/package.json
+RUN bun install --frozen-lockfile --production
+
+COPY --from=build /app/packages/guardian/dist packages/guardian/dist
+COPY --from=build /app/packages/guardian-defaults/dist packages/guardian-defaults/dist
+COPY --from=build /app/packages/guardian-coordinator/dist packages/guardian-coordinator/dist
+
+USER bun
+CMD ["bun", "packages/guardian-coordinator/dist/cli.js"]
