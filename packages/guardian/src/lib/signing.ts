@@ -8,6 +8,11 @@ import { resolveGuardianTimeouts, withAbstractionDeadline } from "./deadline.js"
 import type { Logger } from "./logger.js";
 import { unwrapOrThrow } from "./result.js";
 
+export type SigningAbstractions = Pick<
+  GuardianAbstractions,
+  "getChainClient" | "probeUpstream" | "signTypedData" | "timeouts"
+>;
+
 /**
  * Shared pre-amble for every signing endpoint:
  *   1. Consult `abs.probeUpstream` (when supplied) so a host that already
@@ -22,7 +27,7 @@ import { unwrapOrThrow } from "./result.js";
  * wiring of body schema → abstraction.
  */
 export async function runSigning<TBody extends { chainId: number }, TSuccess, TError>(args: {
-  abs: GuardianAbstractions;
+  abs: SigningAbstractions;
   sign: ValidateAndSign<TBody, TSuccess, TError>;
   body: TBody;
   requestId: string;

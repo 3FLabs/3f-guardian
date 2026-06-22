@@ -92,6 +92,7 @@ export { type VersionResponse, zVersionResponse } from "./schemas/version.js";
 
 // Helpers for implementers building check arrays.
 export { failed, passed, skipped } from "./lib/checks.js";
+export { runSigning, type SigningAbstractions } from "./lib/signing.js";
 
 // Logger contract + noop fallback. Implementers can pass a real pino
 // instance directly (it is structurally assignable to `Logger`), or use

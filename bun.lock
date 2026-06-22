@@ -15,7 +15,7 @@
     },
     "packages/guardian": {
       "name": "@3flabs/guardian",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "dependencies": {
         "@elysiajs/openapi": "^1.4.15",
         "@noble/hashes": "^2.2.0",
@@ -30,9 +30,27 @@
         "vitest": "^4.1.8",
       },
     },
+    "packages/guardian-coordinator": {
+      "name": "@3flabs/guardian-coordinator",
+      "version": "0.1.0",
+      "bin": {
+        "guardian-coordinator": "./dist/cli.js",
+      },
+      "dependencies": {
+        "@3flabs/guardian": "workspace:*",
+        "@3flabs/guardian-defaults": "workspace:*",
+        "better-result": "^2.9.2",
+        "viem": "^2.52.2",
+        "zod": "^4.0.0",
+      },
+      "devDependencies": {
+        "typescript": "^5.9.3",
+        "vitest": "^4.1.8",
+      },
+    },
     "packages/guardian-defaults": {
       "name": "@3flabs/guardian-defaults",
-      "version": "0.2.3",
+      "version": "0.3.0",
       "dependencies": {
         "@3flabs/guardian": "workspace:*",
         "better-result": "^2.9.2",
@@ -49,7 +67,7 @@
     },
     "packages/guardian-test-fixtures": {
       "name": "@3flabs/guardian-test-fixtures",
-      "version": "0.0.0",
+      "version": "0.0.1",
       "dependencies": {
         "prool": "^0.2.4",
         "viem": "^2.52.2",
@@ -62,6 +80,8 @@
   },
   "packages": {
     "@3flabs/guardian": ["@3flabs/guardian@workspace:packages/guardian"],
+
+    "@3flabs/guardian-coordinator": ["@3flabs/guardian-coordinator@workspace:packages/guardian-coordinator"],
 
     "@3flabs/guardian-defaults": ["@3flabs/guardian-defaults@workspace:packages/guardian-defaults"],
 
