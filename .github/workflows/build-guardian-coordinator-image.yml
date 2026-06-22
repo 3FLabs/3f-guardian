@@ -1,0 +1,53 @@
+name: Build guardian coordinator image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-guardian-coordinator-image.yml"
+      - ".dockerignore"
+      - "Dockerfile.guardian-coordinator"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig.base.json"
+      - "packages/guardian/**"
+      - "packages/guardian-defaults/**"
+      - "packages/guardian-coordinator/**"
+      - "packages/guardian-test-fixtures/package.json"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: guardian-coordinator-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.0.0
+        with:
+          context: .
+          file: Dockerfile.guardian-coordinator
+          push: true
+          tags: |
+            ghcr.io/3flabs/3f-guardian/guardian-coordinator:${{ github.sha }}
+            ghcr.io/3flabs/3f-guardian/guardian-coordinator:latest
