@@ -1,5 +1,6 @@
 import {
   noopLogger,
+  runSigning,
   zIntentFundBindingBody,
   zIntentRequestBindingBody,
   zIntentSwapBody,
@@ -9,13 +10,18 @@ import {
   type IntentRequestBindingBody,
   type IntentSwapBody,
   type SigningSuccess,
+  type TokenInfo,
 } from "@3flabs/guardian";
 import { z } from "zod";
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_PAGE_SIZE = 100;
-const DEFAULT_SIGN_TIMEOUT_MS = 6_000;
 const TOKEN_ID = "guardian-coordinator";
+const TOKEN_INFO = {
+  tokenId: TOKEN_ID,
+  scopes: new Set(),
+  requiresHmac: false,
+} satisfies TokenInfo;
 
 const zSigningKind = z.enum(["set_request", "set_fund", "swap"]);
 
@@ -190,57 +196,38 @@ async function signWithGuardian(
   request: SigningRequest,
   parsed: ParsedSigningBody,
 ): Promise<SigningSuccess> {
-  const upstream = guardian.probeUpstream?.();
-  if (upstream?.isErr()) throw upstream.error;
-
-  const chainClient = guardian.getChainClient(parsed.body.chainId);
-  if (chainClient.isErr()) throw chainClient.error;
-
   const requestId = crypto.randomUUID();
-  const signLogger = (guardian.logger ?? noopLogger).child({
+  const logger = (guardian.logger ?? noopLogger).child({
     requestId,
     tokenId: TOKEN_ID,
-    chainId: parsed.body.chainId,
   });
-  const ctxBase = {
-    chainId: parsed.body.chainId,
-    client: chainClient.value,
+
+  const args = {
+    abs: guardian,
     requestId,
-    tokenId: TOKEN_ID,
-    now: new Date(),
-    signTypedData: guardian.signTypedData,
-    logger: signLogger,
+    tokenInfo: TOKEN_INFO,
+    logger,
   };
+  const signed =
+    parsed.kind === "set_request"
+      ? await runSigning({ ...args, sign: guardian.signIntentRequestBinding, body: parsed.body })
+      : parsed.kind === "set_fund"
+        ? await runSigning({ ...args, sign: guardian.signIntentFundBinding, body: parsed.body })
+        : await runSigning({ ...args, sign: guardian.signIntentSwap, body: parsed.body });
 
-  const result = await withSignTimeout(
-    guardian.timeouts?.signMs ?? DEFAULT_SIGN_TIMEOUT_MS,
-    (signal) => {
-      const ctx = { ...ctxBase, signal };
-      switch (parsed.kind) {
-        case "set_request":
-          return guardian.signIntentRequestBinding(ctx, parsed.body);
-        case "set_fund":
-          return guardian.signIntentFundBinding(ctx, parsed.body);
-        case "swap":
-          return guardian.signIntentSwap(ctx, parsed.body);
-      }
-    },
-  );
-  if (result.isErr()) throw result.error;
-
-  const signed = zSigningSuccess.parse(result.value);
-  if (signed.payloadHash.toLowerCase() !== request.payloadHash.toLowerCase()) {
+  const checked = zSigningSuccess.parse(signed);
+  if (checked.payloadHash.toLowerCase() !== request.payloadHash.toLowerCase()) {
     throw new Error(
-      `payloadHash mismatch: signer returned ${signed.payloadHash}, coordinator expected ${request.payloadHash}`,
+      `payloadHash mismatch: signer returned ${checked.payloadHash}, coordinator expected ${request.payloadHash}`,
     );
   }
-  if (signed.guardian.toLowerCase() !== guardian.metadata.guardianSigner.toLowerCase()) {
+  if (checked.guardian.toLowerCase() !== guardian.metadata.guardianSigner.toLowerCase()) {
     throw new Error(
-      `guardian mismatch: signer returned ${signed.guardian}, expected ${guardian.metadata.guardianSigner}`,
+      `guardian mismatch: signer returned ${checked.guardian}, expected ${guardian.metadata.guardianSigner}`,
     );
   }
 
-  return signed;
+  return checked;
 }
 
 function parseSigningBody(request: SigningRequest): ParsedSigningBody {
@@ -251,26 +238,6 @@ function parseSigningBody(request: SigningRequest): ParsedSigningBody {
       return { kind: request.kind, body: zIntentFundBindingBody.parse(request.body) };
     case "swap":
       return { kind: request.kind, body: zIntentSwapBody.parse(request.body) };
-  }
-}
-
-async function withSignTimeout<T>(
-  ms: number,
-  run: (signal: AbortSignal) => Promise<T>,
-): Promise<T> {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      controller.abort(new Error(`guardian coordinator signing timed out after ${ms}ms`));
-      reject(new Error(`guardian coordinator signing timed out after ${ms}ms`));
-    }, ms);
-  });
-  const task = run(controller.signal);
-  try {
-    return await Promise.race([task, timeout]);
-  } finally {
-    clearTimeout(timer);
   }
 }
 
