@@ -1,6 +1,6 @@
 {
   "name": "@3flabs/guardian-defaults",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Default Logger, in-memory rate limiter, and Appendix-A check builders for @3flabs/guardian.",
   "type": "module",
   "main": "./dist/index.js",

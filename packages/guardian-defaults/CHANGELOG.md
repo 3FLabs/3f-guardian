@@ -1,5 +1,12 @@
 # @3flabs/guardian-defaults
 
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [9b4543c]
+  - @3flabs/guardian@0.5.0
+
 ## 0.3.0
 
 ### Minor Changes
