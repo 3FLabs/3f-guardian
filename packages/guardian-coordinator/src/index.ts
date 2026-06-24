@@ -294,8 +294,14 @@ function pollFilters(
 
 function isLoopback(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const ipv4 = host.split(".");
   return (
-    host === "localhost" || host.endsWith(".localhost") || host === "::1" || host.startsWith("127.")
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    (ipv4.length === 4 &&
+      ipv4[0] === "127" &&
+      ipv4.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255))
   );
 }
 

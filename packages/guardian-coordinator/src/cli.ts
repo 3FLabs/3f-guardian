@@ -5,8 +5,12 @@ import { Result } from "better-result";
 import {
   createPublicClient,
   defineChain,
+  hashTypedData,
   http,
   isAddress,
+  isHex,
+  recoverAddress,
+  type Address,
   type Hex,
   type PublicClient,
 } from "viem";
@@ -16,8 +20,11 @@ import {
   makeSignIntentFundBinding,
   makeSignIntentRequestBinding,
   makeSignIntentSwap,
+  InternalError,
   privateKeyToSignTypedData,
+  type SignTypedData,
   UnsupportedChainError,
+  UpstreamUnavailableError,
 } from "@3flabs/guardian";
 import {
   buildIntentFundBindingChecks,
@@ -32,18 +39,19 @@ import {
   runGuardianCoordinator,
   type CoordinatorGuardian,
 } from "./index.js";
+import { awsKmsSignTypedData, gcpKmsSignTypedData } from "./kms-signers.js";
 
 const DEFAULT_MAX_DEADLINE_SECONDS_AHEAD = 600;
 const DEFAULT_EVENT_SCAN_BLOCK_RANGE = 10_000n;
 const DEFAULT_EVENT_SCAN_MAX_LOOKBACK_BLOCKS = 1_000_000n;
+const DEFAULT_REMOTE_SIGNER_TIMEOUT_MS = 6_000;
 const DEFAULT_SWAP_PRICE_TOLERANCE_BPS = 1;
 const MULTICALL3_ADDRESS = "0xca11bde05977b3631167028862be2a173976ca11";
 
 export function buildGuardianFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): CoordinatorGuardian {
-  const privateKey = required(env, "GUARDIAN_SIGNER_KEY") as Hex;
-  const guardianSigner = privateKeyToAccount(privateKey).address;
+  const signer = loadGuardianSigner(env);
   const clients = parseRpcClients(required(env, "GUARDIAN_CHAIN_RPC_URLS"));
   const supportedChains = [...clients.keys()].sort((a, b) => a - b);
 
@@ -55,7 +63,7 @@ export function buildGuardianFromEnv(
   return {
     metadata: {
       build: env.BUILD_ID ?? "0.1.0",
-      guardianSigner,
+      guardianSigner: signer.guardianSigner,
       supportedChains,
     },
     getChainClient: (chainId) => {
@@ -66,7 +74,7 @@ export function buildGuardianFromEnv(
             new UnsupportedChainError({ message: `Unsupported chain ${chainId}`, chainId }),
           );
     },
-    signTypedData: privateKeyToSignTypedData(privateKey),
+    signTypedData: signer.signTypedData,
     signIntentRequestBinding: makeSignIntentRequestBinding({
       checks: buildIntentRequestBindingChecks({
         policy: {
@@ -97,7 +105,7 @@ export function buildGuardianFromEnv(
           ),
         },
       }),
-      guardianSigner,
+      guardianSigner: signer.guardianSigner,
     }),
     signIntentFundBinding: makeSignIntentFundBinding({
       checks: buildIntentFundBindingChecks({
@@ -113,7 +121,7 @@ export function buildGuardianFromEnv(
           ),
         },
       }),
-      guardianSigner,
+      guardianSigner: signer.guardianSigner,
     }),
     signIntentSwap: makeSignIntentSwap({
       checks: buildIntentSwapChecks({
@@ -133,9 +141,218 @@ export function buildGuardianFromEnv(
           ),
         },
       }),
-      guardianSigner,
+      guardianSigner: signer.guardianSigner,
     }),
   };
+}
+
+type LoadedGuardianSigner = {
+  guardianSigner: Address;
+  signTypedData: SignTypedData;
+};
+
+function loadGuardianSigner(env: Record<string, string | undefined>): LoadedGuardianSigner {
+  const provider = env.GUARDIAN_SIGNER_PROVIDER?.trim() || "private_key";
+  switch (provider) {
+    case "private_key": {
+      const privateKey = required(env, "GUARDIAN_SIGNER_KEY") as Hex;
+      return {
+        guardianSigner: privateKeyToAccount(privateKey).address,
+        signTypedData: privateKeyToSignTypedData(privateKey),
+      };
+    }
+    case "remote_http": {
+      const guardianSigner = requiredAddress(env, "GUARDIAN_SIGNER_ADDRESS");
+      return {
+        guardianSigner,
+        signTypedData: remoteHttpSignTypedData({
+          url: remoteSignerUrl(required(env, "GUARDIAN_REMOTE_SIGNER_URL")),
+          guardianSigner,
+          timeoutMs: positiveInt(
+            env.GUARDIAN_REMOTE_SIGNER_TIMEOUT_MS,
+            DEFAULT_REMOTE_SIGNER_TIMEOUT_MS,
+          ),
+          bearerToken: env.GUARDIAN_REMOTE_SIGNER_BEARER_TOKEN?.trim() || undefined,
+        }),
+      };
+    }
+    case "aws_kms": {
+      const guardianSigner = requiredAddress(env, "GUARDIAN_SIGNER_ADDRESS");
+      return {
+        guardianSigner,
+        signTypedData: awsKmsSignTypedData({
+          keyId: required(env, "GUARDIAN_AWS_KMS_KEY_ID"),
+          guardianSigner,
+          region: env.AWS_REGION?.trim() || env.AWS_DEFAULT_REGION?.trim() || undefined,
+        }),
+      };
+    }
+    case "gcp_kms": {
+      const guardianSigner = requiredAddress(env, "GUARDIAN_SIGNER_ADDRESS");
+      return {
+        guardianSigner,
+        signTypedData: gcpKmsSignTypedData({
+          keyVersionName: required(env, "GUARDIAN_GCP_KMS_KEY_VERSION"),
+          guardianSigner,
+        }),
+      };
+    }
+    default:
+      throw new Error(
+        `unsupported GUARDIAN_SIGNER_PROVIDER ${provider}; expected private_key, remote_http, aws_kms, or gcp_kms`,
+      );
+  }
+}
+
+function remoteHttpSignTypedData(args: {
+  url: string;
+  guardianSigner: Address;
+  timeoutMs: number;
+  bearerToken?: string | undefined;
+}): SignTypedData {
+  return async (parameters) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), args.timeoutMs);
+    try {
+      let response: Response;
+      try {
+        response = await fetch(args.url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(args.bearerToken ? { authorization: `Bearer ${args.bearerToken}` } : {}),
+          },
+          body: stringifyJson({ typedData: parameters }),
+          signal: controller.signal,
+        });
+      } catch (cause) {
+        return Result.err(remoteSignerRequestError(cause, controller.signal, args.timeoutMs));
+      }
+
+      if (!response.ok) {
+        return Result.err(
+          new UpstreamUnavailableError({
+            message: `Remote signer returned HTTP ${response.status}`,
+            status: response.status >= 500 ? 503 : 502,
+          }),
+        );
+      }
+
+      const payload = await readJson(response, controller.signal, args.timeoutMs);
+      if (payload.isErr()) return Result.err(payload.error);
+
+      const signature = signatureFromRemotePayload(payload.value);
+      if (!signature) {
+        return Result.err(
+          new InternalError({ message: "Remote signer response missing signature" }),
+        );
+      }
+
+      let recovered: Address;
+      try {
+        recovered = await recoverAddress({ hash: hashTypedData(parameters), signature });
+      } catch (cause) {
+        const error = new InternalError({
+          message: "Remote signer signature was not recoverable",
+        });
+        error.cause = cause;
+        return Result.err(error);
+      }
+      if (recovered.toLowerCase() !== args.guardianSigner.toLowerCase()) {
+        return Result.err(
+          new InternalError({
+            message: "Remote signer signature did not recover to GUARDIAN_SIGNER_ADDRESS",
+          }),
+        );
+      }
+
+      return Result.ok(signature);
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+}
+
+function remoteSignerRequestError(
+  cause: unknown,
+  signal: AbortSignal,
+  timeoutMs: number,
+): UpstreamUnavailableError {
+  const error = new UpstreamUnavailableError({
+    message: signal.aborted
+      ? `Remote signer request timed out after ${timeoutMs}ms`
+      : "Remote signer request failed",
+    status: 503,
+  });
+  error.cause = cause;
+  return error;
+}
+
+async function readJson(
+  response: Response,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<Result<unknown, InternalError | UpstreamUnavailableError>> {
+  try {
+    return Result.ok(await response.json());
+  } catch (cause) {
+    if (signal.aborted) {
+      const error = new UpstreamUnavailableError({
+        message: `Remote signer request timed out after ${timeoutMs}ms`,
+        status: 503,
+      });
+      error.cause = cause;
+      return Result.err(error);
+    }
+    const error = new InternalError({ message: "Remote signer response was not JSON" });
+    error.cause = cause;
+    return Result.err(error);
+  }
+}
+
+function signatureFromRemotePayload(payload: unknown): Hex | undefined {
+  if (typeof payload === "string" && isSignatureHex(payload)) return payload;
+  if (!payload || typeof payload !== "object" || !("signature" in payload)) return undefined;
+
+  const signature = (payload as { signature?: unknown }).signature;
+  return typeof signature === "string" && isSignatureHex(signature) ? signature : undefined;
+}
+
+function isSignatureHex(value: string): value is Hex {
+  return isHex(value) && value.length === 132;
+}
+
+function stringifyJson(value: unknown): string {
+  return JSON.stringify(value, (_key, nested) =>
+    typeof nested === "bigint" ? nested.toString() : nested,
+  );
+}
+
+function requiredAddress(env: Record<string, string | undefined>, key: string): Address {
+  const value = required(env, key);
+  if (!isAddress(value)) throw new Error(`${key} must be a valid address`);
+  return value;
+}
+
+function remoteSignerUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url.hostname))) {
+    throw new Error("GUARDIAN_REMOTE_SIGNER_URL must use https unless it points at localhost");
+  }
+  return url.toString();
+}
+
+function isLoopback(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const ipv4 = host.split(".");
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    (ipv4.length === 4 &&
+      ipv4[0] === "127" &&
+      ipv4.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255))
+  );
 }
 
 function parseRpcClients(value: string): Map<number, PublicClient> {

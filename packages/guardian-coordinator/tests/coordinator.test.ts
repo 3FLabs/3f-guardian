@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Result } from "better-result";
 import type { SigningSuccess } from "@3flabs/guardian";
+import { hashTypedData, recoverTypedDataAddress, type Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
 import {
   loadCoordinatorConfig,
@@ -8,6 +10,7 @@ import {
   type GuardianCoordinatorOptions,
 } from "../src/index.js";
 import { buildGuardianFromEnv as buildCliGuardianFromEnv } from "../src/cli.js";
+import { awsKmsSignTypedData, gcpKmsSignTypedData } from "../src/kms-signers.js";
 
 const REQUEST_ID = "550e8400-e29b-41d4-a716-446655440000";
 const FACILITY = "0x2222222222222222222222222222222222222222";
@@ -16,6 +19,9 @@ const GUARDIAN = "0x0000000000000000000000000000000000000001";
 const HASH = `0x${"b".repeat(64)}` as `0x${string}`;
 const OTHER_HASH = `0x${"c".repeat(64)}` as `0x${string}`;
 const SIGNATURE = `0x${"a".repeat(130)}` as `0x${string}`;
+const KMS_PRIVATE_KEY = `0x${"12".repeat(32)}` as const;
+const KMS_ACCOUNT = privateKeyToAccount(KMS_PRIVATE_KEY);
+const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
 const REQUEST_BODY = {
   chainId: 1,
@@ -43,10 +49,30 @@ const SIGNING_SUCCESS = {
   checks: [],
 } satisfies SigningSuccess;
 
+const TYPED_DATA = {
+  domain: {
+    name: "GuardianTest",
+    version: "1",
+    chainId: 1,
+    verifyingContract: FACILITY,
+  },
+  types: {
+    Ping: [{ name: "id", type: "uint256" }],
+  },
+  primaryType: "Ping",
+  message: {
+    id: 1n,
+  },
+} as const;
+
 const quiet = {
   log() {},
   error() {},
 };
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("guardian coordinator", () => {
   it("signs open requests directly and submits to grunt-api", async () => {
@@ -341,12 +367,24 @@ describe("guardian coordinator", () => {
         COORDINATOR_API_KEY: "guardian-key",
       }),
     ).toThrow(/https/);
+    expect(() =>
+      loadCoordinatorConfig({
+        COORDINATOR_BASE_URL: "http://127.0.0.1.attacker.example/",
+        COORDINATOR_API_KEY: "guardian-key",
+      }),
+    ).toThrow(/https/);
     expect(
       loadCoordinatorConfig({
         COORDINATOR_BASE_URL: "http://localhost:3000/",
         COORDINATOR_API_KEY: "guardian-key",
       }).coordinatorBaseUrl,
     ).toBe("http://localhost:3000");
+    expect(
+      loadCoordinatorConfig({
+        COORDINATOR_BASE_URL: "http://127.0.0.1:3000/",
+        COORDINATOR_API_KEY: "guardian-key",
+      }).coordinatorBaseUrl,
+    ).toBe("http://127.0.0.1:3000");
   });
 
   it("builds the runnable guardian from env", () => {
@@ -366,6 +404,160 @@ describe("guardian coordinator", () => {
       "0xca11bde05977b3631167028862be2a173976ca11",
     );
     expect(guardian.getChainClient(2).isErr()).toBe(true);
+  });
+
+  it("builds a remote-http signer from env without a raw key", async () => {
+    const signature = await KMS_ACCOUNT.signTypedData(TYPED_DATA);
+    const fetchCalls: Array<{ input: unknown; init: RequestInit | undefined }> = [];
+    vi.stubGlobal("fetch", async (input: unknown, init?: RequestInit) => {
+      fetchCalls.push({ input, init });
+      return json({ signature });
+    });
+
+    const guardian = buildCliGuardianFromEnv({
+      ...CLI_ENV,
+      GUARDIAN_SIGNER_PROVIDER: "remote_http",
+      GUARDIAN_SIGNER_ADDRESS: KMS_ACCOUNT.address,
+      GUARDIAN_REMOTE_SIGNER_URL: "http://localhost:9090/sign",
+      GUARDIAN_REMOTE_SIGNER_BEARER_TOKEN: "remote-token",
+      GUARDIAN_REMOTE_SIGNER_TIMEOUT_MS: "2500",
+    });
+
+    expect(guardian.metadata.guardianSigner).toBe(KMS_ACCOUNT.address);
+
+    const result = await guardian.signTypedData(TYPED_DATA);
+
+    if (result.isErr()) throw result.error;
+    expect(result.value).toBe(signature);
+    expect(fetchCalls).toHaveLength(1);
+    const call = fetchCalls[0];
+    if (!call) throw new Error("missing remote signer fetch call");
+    expect(call.input).toBe("http://localhost:9090/sign");
+    expect(call.init?.method).toBe("POST");
+    expect(call.init?.signal).toBeInstanceOf(AbortSignal);
+    expect(call.init?.headers).toEqual({
+      "content-type": "application/json",
+      authorization: "Bearer remote-token",
+    });
+    expect(JSON.parse(String(call.init?.body))).toEqual({
+      typedData: {
+        domain: {
+          name: "GuardianTest",
+          version: "1",
+          chainId: 1,
+          verifyingContract: FACILITY,
+        },
+        types: {
+          Ping: [{ name: "id", type: "uint256" }],
+        },
+        primaryType: "Ping",
+        message: {
+          id: "1",
+        },
+      },
+    });
+  });
+
+  it("rejects remote-http signatures from the wrong signer", async () => {
+    const signature = await KMS_ACCOUNT.signTypedData(TYPED_DATA);
+    vi.stubGlobal("fetch", async () => json({ signature }));
+
+    const guardian = buildCliGuardianFromEnv({
+      ...CLI_ENV,
+      GUARDIAN_SIGNER_PROVIDER: "remote_http",
+      GUARDIAN_SIGNER_ADDRESS: GUARDIAN,
+      GUARDIAN_REMOTE_SIGNER_URL: "http://localhost:9090/sign",
+    });
+
+    const result = await guardian.signTypedData(TYPED_DATA);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error.message).toMatch(/recover to GUARDIAN_SIGNER_ADDRESS/);
+    }
+  });
+
+  it("rejects non-local http remote signer URLs", () => {
+    expect(() =>
+      buildCliGuardianFromEnv({
+        ...CLI_ENV,
+        GUARDIAN_SIGNER_PROVIDER: "remote_http",
+        GUARDIAN_SIGNER_ADDRESS: GUARDIAN,
+        GUARDIAN_REMOTE_SIGNER_URL: "http://127.0.0.1.attacker.example/sign",
+      }),
+    ).toThrow(/https/);
+    expect(
+      buildCliGuardianFromEnv({
+        ...CLI_ENV,
+        GUARDIAN_SIGNER_PROVIDER: "remote_http",
+        GUARDIAN_SIGNER_ADDRESS: GUARDIAN,
+        GUARDIAN_REMOTE_SIGNER_URL: "http://127.0.0.1:9090/sign",
+      }).metadata.guardianSigner,
+    ).toBe(GUARDIAN);
+  });
+
+  it("builds aws-kms and gcp-kms signers from env without a raw key", () => {
+    const awsGuardian = buildCliGuardianFromEnv({
+      ...CLI_ENV,
+      GUARDIAN_SIGNER_PROVIDER: "aws_kms",
+      GUARDIAN_SIGNER_ADDRESS: KMS_ACCOUNT.address,
+      GUARDIAN_AWS_KMS_KEY_ID: "alias/guardian",
+      AWS_REGION: "us-east-1",
+    });
+    expect(awsGuardian.metadata.guardianSigner).toBe(KMS_ACCOUNT.address);
+
+    const gcpGuardian = buildCliGuardianFromEnv({
+      ...CLI_ENV,
+      GUARDIAN_SIGNER_PROVIDER: "gcp_kms",
+      GUARDIAN_SIGNER_ADDRESS: KMS_ACCOUNT.address,
+      GUARDIAN_GCP_KMS_KEY_VERSION:
+        "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1",
+    });
+    expect(gcpGuardian.metadata.guardianSigner).toBe(KMS_ACCOUNT.address);
+  });
+
+  it("aws-kms signs the EIP-712 digest and returns an Ethereum signature", async () => {
+    const derSignature = await derFromTypedDataSignature();
+    const digests: Hex[] = [];
+    const signer = awsKmsSignTypedData({
+      keyId: "alias/guardian",
+      guardianSigner: KMS_ACCOUNT.address,
+      signDigest: async ({ keyId, digest }) => {
+        expect(keyId).toBe("alias/guardian");
+        digests.push(digest);
+        return derSignature;
+      },
+    });
+
+    const result = await signer(TYPED_DATA);
+
+    if (result.isErr()) throw result.error;
+    expect(digests).toEqual([hashTypedData(TYPED_DATA)]);
+    await expect(recoverTypedDataAddress({ ...TYPED_DATA, signature: result.value })).resolves.toBe(
+      KMS_ACCOUNT.address,
+    );
+  });
+
+  it("gcp-kms normalizes high-S signatures before returning Ethereum hex", async () => {
+    const derSignature = await derFromTypedDataSignature({ highS: true });
+    const signer = gcpKmsSignTypedData({
+      keyVersionName: "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1",
+      guardianSigner: KMS_ACCOUNT.address,
+      signDigest: async ({ keyVersionName, digest }) => {
+        expect(keyVersionName).toContain("/cryptoKeyVersions/1");
+        expect(digest).toBe(hashTypedData(TYPED_DATA));
+        return derSignature;
+      },
+    });
+
+    const result = await signer(TYPED_DATA);
+
+    if (result.isErr()) throw result.error;
+    const s = BigInt(`0x${result.value.slice(66, 130)}`);
+    expect(s).toBeLessThanOrEqual(SECP256K1_N / 2n);
+    await expect(recoverTypedDataAddress({ ...TYPED_DATA, signature: result.value })).resolves.toBe(
+      KMS_ACCOUNT.address,
+    );
   });
 
   it("rejects checksum-invalid allowlist addresses", () => {
@@ -422,4 +614,41 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+async function derFromTypedDataSignature(options: { highS?: boolean } = {}): Promise<Uint8Array> {
+  const signature = await KMS_ACCOUNT.signTypedData(TYPED_DATA);
+  const r = BigInt(`0x${signature.slice(2, 66)}`);
+  const rawS = BigInt(`0x${signature.slice(66, 130)}`);
+  const s = options.highS ? SECP256K1_N - rawS : rawS;
+  return derEncode(r, s);
+}
+
+function derEncode(r: bigint, s: bigint): Uint8Array {
+  const rBytes = derInteger(r);
+  const sBytes = derInteger(s);
+  return concatBytes(
+    Uint8Array.of(0x30, 2 + rBytes.length + 2 + sBytes.length),
+    Uint8Array.of(0x02, rBytes.length),
+    rBytes,
+    Uint8Array.of(0x02, sBytes.length),
+    sBytes,
+  );
+}
+
+function derInteger(value: bigint): Uint8Array {
+  let hex = value.toString(16);
+  if (hex.length % 2 !== 0) hex = `0${hex}`;
+  if (Number.parseInt(hex.slice(0, 2), 16) >= 0x80) hex = `00${hex}`;
+  return Uint8Array.from(Buffer.from(hex, "hex"));
+}
+
+function concatBytes(...chunks: readonly Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
 }
