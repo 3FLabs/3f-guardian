@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Result } from "better-result";
-import type { SigningSuccess } from "@3flabs/guardian";
+import type { RequestWhitelistingResponse, SigningSuccess } from "@3flabs/guardian";
 import { hashTypedData, recoverTypedDataAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -15,6 +15,7 @@ import { awsKmsSignTypedData, gcpKmsSignTypedData } from "../src/kms-signers.js"
 const REQUEST_ID = "550e8400-e29b-41d4-a716-446655440000";
 const FACILITY = "0x2222222222222222222222222222222222222222";
 const OTHER_FACILITY = "0x9999999999999999999999999999999999999999";
+const WHITELIST_BOOK = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const GUARDIAN = "0x0000000000000000000000000000000000000001";
 const HASH = `0x${"b".repeat(64)}` as `0x${string}`;
 const OTHER_HASH = `0x${"c".repeat(64)}` as `0x${string}`;
@@ -30,6 +31,15 @@ const REQUEST_BODY = {
   requestContract: "0x3333333333333333333333333333333333333333",
   deadline: 1_800_000_000,
 };
+
+const REQUEST_WHITELISTING_BODY = {
+  chainId: 1,
+  whitelistBook: WHITELIST_BOOK,
+  operation: "whitelist",
+  requestContracts: ["0x3333333333333333333333333333333333333333"],
+  nonce: "0",
+  deadline: 1_800_000_000,
+} as const;
 
 const SIGNING_REQUEST = {
   id: REQUEST_ID,
@@ -48,6 +58,12 @@ const SIGNING_SUCCESS = {
   signedAt: "2026-04-22T10:15:00Z",
   checks: [],
 } satisfies SigningSuccess;
+
+const REQUEST_WHITELISTING_SUCCESS = {
+  ...SIGNING_SUCCESS,
+  address: GUARDIAN,
+  nonce: "0",
+} satisfies RequestWhitelistingResponse;
 
 const TYPED_DATA = {
   domain: {
@@ -116,6 +132,7 @@ describe("guardian coordinator", () => {
 
   it("maps each signing kind to the matching guardian function", async () => {
     const seen: string[] = [];
+    const submitted: string[] = [];
     const options = optionsFor({
       signIntentRequestBinding: async () => {
         seen.push("set_request");
@@ -129,12 +146,17 @@ describe("guardian coordinator", () => {
         seen.push("swap");
         return Result.ok(SIGNING_SUCCESS);
       },
+      signRequestWhitelisting: async (_ctx, body) => {
+        seen.push("request_whitelisting");
+        expect(body).toEqual(REQUEST_WHITELISTING_BODY);
+        return Result.ok(REQUEST_WHITELISTING_SUCCESS);
+      },
     });
     options.fetcher = async (input) => {
       const url = String(input);
       if (url.startsWith("http://coordinator.test/v1/guardian/signing-requests?")) {
         return json({
-          total: 3,
+          total: 4,
           page: 1,
           pageSize: 100,
           items: [
@@ -174,14 +196,63 @@ describe("guardian coordinator", () => {
                 deadline: 1_800_000_000,
               },
             },
+            {
+              ...SIGNING_REQUEST,
+              id: "850e8400-e29b-41d4-a716-446655440000",
+              kind: "request_whitelisting",
+              facility: WHITELIST_BOOK,
+              body: REQUEST_WHITELISTING_BODY,
+            },
           ],
         });
       }
+      submitted.push(url);
       return json({ status: "accepted", quorumReached: true, submissionCount: 1 });
     };
 
     await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
-    expect(seen).toEqual(["set_request", "set_fund", "swap"]);
+    expect(seen).toEqual(["set_request", "set_fund", "swap", "request_whitelisting"]);
+    expect(submitted).toHaveLength(4);
+  });
+
+  it("reports request whitelisting rows when the optional signer is unavailable", async () => {
+    const errors: string[] = [];
+    const calls: string[] = [];
+    const options = optionsFor({ signRequestWhitelisting: undefined });
+    options.logger = {
+      log() {},
+      error(message) {
+        errors.push(String(message));
+      },
+    };
+    options.fetcher = async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.startsWith("http://coordinator.test/v1/guardian/signing-requests?")) {
+        return json({
+          total: 1,
+          page: 1,
+          pageSize: 100,
+          items: [
+            {
+              ...SIGNING_REQUEST,
+              kind: "request_whitelisting",
+              facility: WHITELIST_BOOK,
+              body: REQUEST_WHITELISTING_BODY,
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected call ${url}`);
+    };
+
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(
+      errors.some((message) =>
+        message.includes("request_whitelisting signing requires signRequestWhitelisting support"),
+      ),
+    ).toBe(true);
   });
 
   it("skips malformed rows without dropping valid rows in the same page", async () => {
@@ -604,6 +675,7 @@ function optionsFor(
       signIntentRequestBinding: async () => Result.ok(SIGNING_SUCCESS),
       signIntentFundBinding: async () => Result.ok(SIGNING_SUCCESS),
       signIntentSwap: async () => Result.ok(SIGNING_SUCCESS),
+      signRequestWhitelisting: async () => Result.ok(REQUEST_WHITELISTING_SUCCESS),
       ...guardianOverrides,
     },
   };

@@ -4,11 +4,14 @@ import {
   zIntentFundBindingBody,
   zIntentRequestBindingBody,
   zIntentSwapBody,
+  zRequestWhitelistingBody,
+  zRequestWhitelistingResponse,
   zSigningSuccess,
   type GuardianAbstractions,
   type IntentFundBindingBody,
   type IntentRequestBindingBody,
   type IntentSwapBody,
+  type RequestWhitelistingBody,
   type SigningSuccess,
   type TokenInfo,
 } from "@3flabs/guardian";
@@ -23,7 +26,7 @@ const TOKEN_INFO = {
   requiresHmac: false,
 } satisfies TokenInfo;
 
-const zSigningKind = z.enum(["set_request", "set_fund", "swap"]);
+const zSigningKind = z.enum(["set_request", "set_fund", "swap", "request_whitelisting"]);
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 type CoordinatorLogger = Pick<Console, "error" | "log">;
@@ -38,7 +41,9 @@ export type CoordinatorGuardian = Pick<
   | "signIntentRequestBinding"
   | "signIntentFundBinding"
   | "signIntentSwap"
->;
+> & {
+  signRequestWhitelisting?: GuardianAbstractions["signRequestWhitelisting"];
+};
 
 export type CoordinatorConnectionConfig = {
   coordinatorBaseUrl: string;
@@ -58,7 +63,8 @@ export type GuardianCoordinatorOptions = CoordinatorConnectionConfig & {
 type ParsedSigningBody =
   | { kind: "set_request"; body: IntentRequestBindingBody }
   | { kind: "set_fund"; body: IntentFundBindingBody }
-  | { kind: "swap"; body: IntentSwapBody };
+  | { kind: "swap"; body: IntentSwapBody }
+  | { kind: "request_whitelisting"; body: RequestWhitelistingBody };
 
 const zSigningRequest = z
   .object({
@@ -151,14 +157,15 @@ export async function runGuardianCoordinatorOnce(
               `chainId mismatch: request ${request.chainId}, body ${parsed.body.chainId}`,
             );
           }
-          if (request.facility.toLowerCase() !== parsed.body.facility.toLowerCase()) {
+          const target = requestTarget(parsed);
+          if (request.facility.toLowerCase() !== target.address.toLowerCase()) {
             throw new Error(
-              `facility mismatch: request ${request.facility}, body ${parsed.body.facility}`,
+              `${target.field} mismatch: request ${request.facility}, body ${target.address}`,
             );
           }
           if (
             (options.chainIds && !options.chainIds.has(parsed.body.chainId)) ||
-            (options.facilities && !options.facilities.has(parsed.body.facility.toLowerCase()))
+            (options.facilities && !options.facilities.has(target.address.toLowerCase()))
           ) {
             continue;
           }
@@ -208,14 +215,26 @@ async function signWithGuardian(
     tokenInfo: TOKEN_INFO,
     logger,
   };
-  const signed =
-    parsed.kind === "set_request"
-      ? await runSigning({ ...args, sign: guardian.signIntentRequestBinding, body: parsed.body })
-      : parsed.kind === "set_fund"
-        ? await runSigning({ ...args, sign: guardian.signIntentFundBinding, body: parsed.body })
-        : await runSigning({ ...args, sign: guardian.signIntentSwap, body: parsed.body });
+  const signed = await (async () => {
+    switch (parsed.kind) {
+      case "set_request":
+        return runSigning({ ...args, sign: guardian.signIntentRequestBinding, body: parsed.body });
+      case "set_fund":
+        return runSigning({ ...args, sign: guardian.signIntentFundBinding, body: parsed.body });
+      case "swap":
+        return runSigning({ ...args, sign: guardian.signIntentSwap, body: parsed.body });
+      case "request_whitelisting":
+        if (!guardian.signRequestWhitelisting) {
+          throw new Error("request_whitelisting signing requires signRequestWhitelisting support");
+        }
+        return runSigning({ ...args, sign: guardian.signRequestWhitelisting, body: parsed.body });
+    }
+  })();
 
-  const checked = zSigningSuccess.parse(signed);
+  const checked =
+    parsed.kind === "request_whitelisting"
+      ? zRequestWhitelistingResponse.parse(signed)
+      : zSigningSuccess.parse(signed);
   if (checked.payloadHash.toLowerCase() !== request.payloadHash.toLowerCase()) {
     throw new Error(
       `payloadHash mismatch: signer returned ${checked.payloadHash}, coordinator expected ${request.payloadHash}`,
@@ -238,7 +257,18 @@ function parseSigningBody(request: SigningRequest): ParsedSigningBody {
       return { kind: request.kind, body: zIntentFundBindingBody.parse(request.body) };
     case "swap":
       return { kind: request.kind, body: zIntentSwapBody.parse(request.body) };
+    case "request_whitelisting":
+      return { kind: request.kind, body: zRequestWhitelistingBody.parse(request.body) };
   }
+}
+
+function requestTarget(parsed: ParsedSigningBody): {
+  field: "facility" | "whitelistBook";
+  address: string;
+} {
+  return parsed.kind === "request_whitelisting"
+    ? { field: "whitelistBook", address: parsed.body.whitelistBook }
+    : { field: "facility", address: parsed.body.facility };
 }
 
 async function requestJson(
