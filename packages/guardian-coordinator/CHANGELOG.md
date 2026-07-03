@@ -1,5 +1,12 @@
 # @3flabs/guardian-coordinator
 
+## 0.2.1
+
+### Patch Changes
+
+- 4d92363: Add native AWS and GCP KMS signer providers and harden remote signer validation.
+- 66a5d1b: Add coordinator support for `request_whitelisting` signing requests.
+
 ## 0.2.0
 
 ### Minor Changes

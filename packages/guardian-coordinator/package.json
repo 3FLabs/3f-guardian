@@ -1,6 +1,6 @@
 {
   "name": "@3flabs/guardian-coordinator",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Lite in-process coordinator that submits @3flabs/guardian signatures to grunt-api.",
   "type": "module",
   "main": "./dist/index.js",
