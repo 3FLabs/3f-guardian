@@ -20,6 +20,7 @@ import {
   makeSignIntentFundBinding,
   makeSignIntentRequestBinding,
   makeSignIntentSwap,
+  makeSignRequestWhitelisting,
   InternalError,
   privateKeyToSignTypedData,
   type SignTypedData,
@@ -30,6 +31,7 @@ import {
   buildIntentFundBindingChecks,
   buildIntentRequestBindingChecks,
   buildIntentSwapChecks,
+  buildRequestWhitelistingChecks,
 } from "@3flabs/guardian-defaults";
 
 import {
@@ -44,6 +46,7 @@ import { awsKmsSignTypedData, gcpKmsSignTypedData } from "./kms-signers.js";
 const DEFAULT_MAX_DEADLINE_SECONDS_AHEAD = 600;
 const DEFAULT_EVENT_SCAN_BLOCK_RANGE = 10_000n;
 const DEFAULT_EVENT_SCAN_MAX_LOOKBACK_BLOCKS = 1_000_000n;
+const DEFAULT_MAX_NONCE_ABOVE_FLOOR = 100n;
 const DEFAULT_REMOTE_SIGNER_TIMEOUT_MS = 6_000;
 const DEFAULT_SWAP_PRICE_TOLERANCE_BPS = 1;
 const MULTICALL3_ADDRESS = "0xca11bde05977b3631167028862be2a173976ca11";
@@ -59,6 +62,36 @@ export function buildGuardianFromEnv(
     env.GUARDIAN_MAX_DEADLINE_SECONDS_AHEAD,
     DEFAULT_MAX_DEADLINE_SECONDS_AHEAD,
   );
+  const requestBindingPolicy = {
+    maxDeadlineSecondsAhead,
+    acceptedRequestFactories: parseAddressMap(
+      required(env, "GUARDIAN_REQUEST_FACTORIES"),
+      "GUARDIAN_REQUEST_FACTORIES",
+    ),
+    acceptedOwners: parseAddressMap(
+      required(env, "GUARDIAN_REQUEST_OWNERS"),
+      "GUARDIAN_REQUEST_OWNERS",
+    ),
+    acceptedPullers: parseAddressMap(
+      required(env, "GUARDIAN_REQUEST_PULLERS"),
+      "GUARDIAN_REQUEST_PULLERS",
+    ),
+    acceptedConsumers: parseAddressMap(
+      required(env, "GUARDIAN_REQUEST_CONSUMERS"),
+      "GUARDIAN_REQUEST_CONSUMERS",
+    ),
+    eventScanBlockRange: positiveBigInt(
+      env.GUARDIAN_EVENT_SCAN_BLOCK_RANGE,
+      DEFAULT_EVENT_SCAN_BLOCK_RANGE,
+    ),
+    eventScanMaxLookbackBlocks: positiveBigInt(
+      env.GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
+      DEFAULT_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
+    ),
+  };
+  const acceptedWhitelistBooks = env.GUARDIAN_ACCEPTED_WHITELIST_BOOKS?.trim()
+    ? parseAddressMap(env.GUARDIAN_ACCEPTED_WHITELIST_BOOKS, "GUARDIAN_ACCEPTED_WHITELIST_BOOKS")
+    : undefined;
 
   return {
     metadata: {
@@ -76,35 +109,7 @@ export function buildGuardianFromEnv(
     },
     signTypedData: signer.signTypedData,
     signIntentRequestBinding: makeSignIntentRequestBinding({
-      checks: buildIntentRequestBindingChecks({
-        policy: {
-          maxDeadlineSecondsAhead,
-          acceptedRequestFactories: parseAddressMap(
-            required(env, "GUARDIAN_REQUEST_FACTORIES"),
-            "GUARDIAN_REQUEST_FACTORIES",
-          ),
-          acceptedOwners: parseAddressMap(
-            required(env, "GUARDIAN_REQUEST_OWNERS"),
-            "GUARDIAN_REQUEST_OWNERS",
-          ),
-          acceptedPullers: parseAddressMap(
-            required(env, "GUARDIAN_REQUEST_PULLERS"),
-            "GUARDIAN_REQUEST_PULLERS",
-          ),
-          acceptedConsumers: parseAddressMap(
-            required(env, "GUARDIAN_REQUEST_CONSUMERS"),
-            "GUARDIAN_REQUEST_CONSUMERS",
-          ),
-          eventScanBlockRange: positiveBigInt(
-            env.GUARDIAN_EVENT_SCAN_BLOCK_RANGE,
-            DEFAULT_EVENT_SCAN_BLOCK_RANGE,
-          ),
-          eventScanMaxLookbackBlocks: positiveBigInt(
-            env.GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
-            DEFAULT_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
-          ),
-        },
-      }),
+      checks: buildIntentRequestBindingChecks({ policy: requestBindingPolicy }),
       guardianSigner: signer.guardianSigner,
     }),
     signIntentFundBinding: makeSignIntentFundBinding({
@@ -140,6 +145,20 @@ export function buildGuardianFromEnv(
             DEFAULT_SWAP_PRICE_TOLERANCE_BPS,
           ),
         },
+      }),
+      guardianSigner: signer.guardianSigner,
+    }),
+    signRequestWhitelisting: makeSignRequestWhitelisting({
+      checks: buildRequestWhitelistingChecks({
+        policy: {
+          ...requestBindingPolicy,
+          maxNonceAboveFloor: nonNegativeBigInt(
+            env.GUARDIAN_MAX_NONCE_ABOVE_FLOOR,
+            DEFAULT_MAX_NONCE_ABOVE_FLOOR,
+          ),
+          ...(acceptedWhitelistBooks ? { acceptedWhitelistBooks } : {}),
+        },
+        guardianSigner: signer.guardianSigner,
       }),
       guardianSigner: signer.guardianSigner,
     }),
@@ -410,6 +429,14 @@ function positiveBigInt(value: string | undefined, fallback: bigint): bigint {
   if (!value) return fallback;
   const parsed = BigInt(value);
   if (parsed <= 0n) throw new Error(`expected positive bigint: ${value}`);
+  return parsed;
+}
+
+function nonNegativeBigInt(value: string | undefined, fallback: bigint): bigint {
+  const raw = value?.trim();
+  if (!raw) return fallback;
+  const parsed = BigInt(raw);
+  if (parsed < 0n) throw new Error(`expected non-negative bigint: ${raw}`);
   return parsed;
 }
 

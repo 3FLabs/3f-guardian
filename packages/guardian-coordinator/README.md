@@ -42,7 +42,8 @@ Optional env:
 - `POLL_INTERVAL_MS` default `5000`
 - `PAGE_SIZE` default `100`
 - `CHAIN_IDS` comma-separated signing-request filter
-- `FACILITIES` comma-separated signing-request filter
+- `FACILITIES` comma-separated signing-request filter (facility, or whitelist book for
+  `request_whitelisting`)
 - `GUARDIAN_SIGNER_PROVIDER` default `private_key`; supported values are `private_key`,
   `remote_http`, `aws_kms`, and `gcp_kms`
 - `GUARDIAN_REMOTE_SIGNER_BEARER_TOKEN` bearer token for `remote_http`
@@ -53,6 +54,8 @@ Optional env:
 - `GUARDIAN_MAX_DEADLINE_SECONDS_AHEAD` default `600`
 - `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` default `10000`
 - `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` default `1000000`
+- `GUARDIAN_MAX_NONCE_ABOVE_FLOOR` default `100`, for request-whitelisting nonce windows
+- `GUARDIAN_ACCEPTED_WHITELIST_BOOKS` optional `chainId=addr,addr;chainId=addr`
 - `GUARDIAN_SWAP_PRICE_TOLERANCE_BPS` default `1`
 
 For `remote_http`, the coordinator sends:
