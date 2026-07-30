@@ -1,11 +1,14 @@
 import { type Address, type PublicClient } from "viem";
 
 import { requestAbi } from "../abi/request.js";
-import { requestFactoryAbi } from "../abi/request-factory.js";
+import { morphoFlashLoanRequestFactoryAbi, requestFactoryAbi } from "../abi/request-factory.js";
 
 const rolesUpdatedEvent = requestAbi.find((x) => x.type === "event" && x.name === "RolesUpdated")!;
 const requestCreatedEvent = requestFactoryAbi.find(
   (x) => x.type === "event" && x.name === "RequestCreated",
+)!;
+const flashLoanRequestCreatedEvent = morphoFlashLoanRequestFactoryAbi.find(
+  (x) => x.type === "event" && x.name === "FlashLoanRequestCreated",
 )!;
 
 /**
@@ -13,7 +16,7 @@ const requestCreatedEvent = requestFactoryAbi.find(
  * pair.
  *
  *  - `resolved` — we walked back far enough to observe the
- *    `RequestCreated` event for this request (or hit `fromBlock = 0`).
+ *    factory deployment event for this request (or hit `fromBlock = 0`).
  *    `holders` is the replayed final state: every address with at least
  *    one role bit set (zero-roles entries are pruned).
  *
@@ -39,7 +42,7 @@ export type RoleScanOutcome =
       readonly holders: ReadonlyMap<Address, bigint>;
       readonly deploymentBlock: bigint;
       /**
-       * The accepted factory that emitted the matched `RequestCreated`
+       * The accepted factory that emitted the matched deployment
        * event. `undefined` when the scan resolved by reaching block 0
        * without observing the deployment event.
        */
@@ -48,15 +51,15 @@ export type RoleScanOutcome =
   | { readonly kind: "tooOld"; readonly partialHolders: ReadonlyMap<Address, bigint> };
 
 type ChunkLog = {
-  eventName: "RolesUpdated" | "RequestCreated";
+  eventName: "RolesUpdated" | "RequestCreated" | "FlashLoanRequestCreated";
   blockNumber: bigint;
   logIndex: number;
-  args: { user?: Address; roles?: bigint; request?: Address };
+  args: { user?: Address; roles?: bigint; request?: Address; flashLoanRequest?: Address };
 };
 
 /**
  * Walks the chain backwards in chunks of `blockRange` blocks, gathering
- * `RolesUpdated` events on `requestContract` and `RequestCreated`
+ * `RolesUpdated` events on `requestContract` and supported deployment
  * events on any of `factories`. Stops as soon as the deployment event
  * for this `requestContract` is observed, or when `maxLookbackBlocks`
  * worth of history has been scanned (whichever comes first).
@@ -64,17 +67,16 @@ type ChunkLog = {
  * `factories` is every accepted factory whose `isRequest()` claimed the
  * contract — usually one, but during a factory migration (or with a
  * back-compat registry proxy) more than one can answer `true`, and
- * scanning only the first would miss the real `RequestCreated` and
+ * scanning only the first would miss the real deployment event and
  * silently degrade the outcome to `tooOld`.
  *
  * Each chunk is a single `eth_getLogs` call with `address` restricted
  * to `[...factories, requestContract]` and `topics[0]` filtered
- * server-side to the two event signatures via viem's typed `events`
- * API. The factory's `RequestCreated` event does not index `request`,
- * so the deployment match is decided client-side after viem decodes
- * the args. Every decoded log is additionally attributed to its
+ * server-side via viem's typed `events` API. The deployment match is
+ * decided client-side after viem decodes the args. Every decoded log is
+ * additionally attributed to its
  * emitting address client-side: only `RolesUpdated` emitted by
- * `requestContract` enters the replay, and only `RequestCreated`
+ * `requestContract` enters the replay, and only deployment events
  * emitted by one of `factories` can mark the deployment — the
  * OR-of-addresses wire filter alone would let a factory-emitted
  * `RolesUpdated` pollute the holder map.
@@ -155,7 +157,7 @@ export async function scanRoleHolders(args: {
     // oxlint-disable-next-line no-await-in-loop
     const logs = await client.getLogs({
       address: [...factories, requestContract],
-      events: [rolesUpdatedEvent, requestCreatedEvent],
+      events: [rolesUpdatedEvent, requestCreatedEvent, flashLoanRequestCreatedEvent],
       fromBlock,
       toBlock,
     });
@@ -169,13 +171,14 @@ export async function scanRoleHolders(args: {
       // it into the request contract's holder map would be fail-open: a
       // factory-level grant with an overlapping role bit could mask an
       // empty request-contract holder set into a pass. Likewise a
-      // `RequestCreated` not emitted by one of the matched factories
+      // A deployment event not emitted by one of the matched factories
       // must never count as the deployment marker.
       const emitter = log.address.toLowerCase();
-      if (log.eventName === "RequestCreated") {
+      if (log.eventName === "RequestCreated" || log.eventName === "FlashLoanRequestCreated") {
         const emittingFactory = factoryByLower.get(emitter);
         if (emittingFactory === undefined) continue;
-        const created = log.args.request;
+        const created =
+          log.eventName === "RequestCreated" ? log.args.request : log.args.flashLoanRequest;
         if (created && created.toLowerCase() === requestContractLower) {
           foundDeploymentBlock = log.blockNumber;
           deploymentFactory = emittingFactory;
@@ -187,7 +190,12 @@ export async function scanRoleHolders(args: {
         eventName: log.eventName,
         blockNumber: log.blockNumber,
         logIndex: log.logIndex,
-        args: log.args as { user?: Address; roles?: bigint; request?: Address },
+        args: log.args as {
+          user?: Address;
+          roles?: bigint;
+          request?: Address;
+          flashLoanRequest?: Address;
+        },
       });
     }
 
@@ -208,7 +216,7 @@ export async function scanRoleHolders(args: {
   return {
     kind: "resolved",
     holders: replayRoleState(allLogs),
-    // If we never observed a RequestCreated event but earliestAllowed
+    // If we never observed a deployment event but earliestAllowed
     // is 0n, treat the genesis block as the deployment lower bound.
     deploymentBlock: foundDeploymentBlock ?? 0n,
     deploymentFactory,

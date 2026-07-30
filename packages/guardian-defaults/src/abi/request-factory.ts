@@ -31,3 +31,26 @@ export const requestFactoryAbi = [
     anonymous: false,
   },
 ] as const;
+
+/** Minimal ABI for `MorphoFlashLoanRequestFactory`. */
+export const morphoFlashLoanRequestFactoryAbi = [
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "isFlashLoanRequest",
+    inputs: [{ name: "flashLoanRequest", type: "address" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    type: "event",
+    name: "FlashLoanRequestCreated",
+    inputs: [
+      { name: "flashLoanRequest", type: "address", indexed: true },
+      { name: "owner", type: "address", indexed: true },
+      { name: "executor", type: "address", indexed: false },
+      { name: "facility", type: "address", indexed: false },
+      { name: "asset", type: "address", indexed: false },
+    ],
+    anonymous: false,
+  },
+] as const;

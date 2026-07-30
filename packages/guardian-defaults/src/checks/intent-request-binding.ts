@@ -12,7 +12,7 @@ import {
 import type { StandardSchemaV1 } from "../cache/standard-schema.js";
 import type { AsyncCache } from "../cache/types.js";
 import { requestAbi, ROLE_CONSUMER, ROLE_PULLER } from "../abi/request.js";
-import { requestFactoryAbi } from "../abi/request-factory.js";
+import { morphoFlashLoanRequestFactoryAbi, requestFactoryAbi } from "../abi/request-factory.js";
 import {
   checkDeadline,
   checkMembership,
@@ -34,6 +34,9 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
  *  - `acceptedRequestFactories` — replaces the old "accepted-origins"
  *    set. A request contract is considered legitimate iff at least one
  *    accepted factory's `isRequest(addr)` returns `true`.
+ *
+ *  - `acceptedFlashLoanRequestFactories` — Morpho flash-loan request
+ *    factories, checked with `isFlashLoanRequest(addr)`.
  *
  *  - `acceptedOwners` — `Ownable.owner()` on the request contract MUST
  *    be on this set.
@@ -77,6 +80,7 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
 export type IntentRequestBindingPolicy = {
   readonly maxDeadlineSecondsAhead: number;
   readonly acceptedRequestFactories: ReadonlyMap<number, ReadonlySet<string>>;
+  readonly acceptedFlashLoanRequestFactories?: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedOwners: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedPullers: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedConsumers: ReadonlyMap<number, ReadonlySet<string>>;
@@ -207,7 +211,7 @@ export type A1Deps = {
  *
  * Stage 1 — single multicall (`allowFailure: true`):
  *   - `request.owner()`
- *   - `factory.isRequest(requestContract)` for each accepted factory
+ *   - the configured provenance check for each accepted factory
  *
  * If no factory returns `true`, every on-chain entry is emitted as
  * `skipped:true` and the request fails on check #1 alone.
@@ -215,10 +219,10 @@ export type A1Deps = {
  * Stage 2 — role-events scan against every matched factory (usually
  * one; multiple during a factory migration):
  *   - Walks backwards in `eventScanBlockRange` chunks until a matched
- *     factory's `RequestCreated` event for `requestContract` is found
+ *     factory's deployment event for `requestContract` is found
  *     OR `eventScanMaxLookbackBlocks` is exhausted.
  *   - Each chunk is one `getLogs` filtered server-side to
- *     `[factories…, requestContract]` × `[RolesUpdated, RequestCreated]`.
+ *     `[factories…, requestContract]` × role/deployment events.
  *   - "Too old" outcome → role checks fail (422) if a rogue grant was
  *     observed inside the scanned window, otherwise follow the
  *     policy's `onLookbackExhausted` disposition (default: skipped).
@@ -232,7 +236,7 @@ export type A1Deps = {
  * classified as `noFactory` (an EOA is by definition not "deployed by
  * an accepted factory"), which is cached and rolls up to a 422 check
  * failure. A deterministic failure of an OPERATOR-configured factory's
- * `isRequest()` slot is a configuration error, not a client error: the
+ * provenance slot is a configuration error, not a client error: the
  * slot is treated as a non-match and logged at error level, and if no
  * healthy factory matches either the request fails 503 (never cached)
  * so the misconfiguration stays an operator-visible alarm instead of a
@@ -329,10 +333,23 @@ async function fetchA1OnChain(
   policy: IntentRequestBindingPolicy,
 ): Promise<Result<A1OnChainData, UpstreamUnavailableError>> {
   const acceptedFactories = policy.acceptedRequestFactories.get(chainId) ?? new Set<string>();
-  const factoriesArr = [...acceptedFactories].map((f) => f as Address);
+  const acceptedFlashLoanFactories =
+    policy.acceptedFlashLoanRequestFactories?.get(chainId) ?? new Set<string>();
+  const factoryChecks = [
+    ...[...acceptedFactories].map((factory) => ({
+      factory: factory as Address,
+      abi: requestFactoryAbi,
+      functionName: "isRequest" as const,
+    })),
+    ...[...acceptedFlashLoanFactories].map((factory) => ({
+      factory: factory as Address,
+      abi: morphoFlashLoanRequestFactoryAbi,
+      functionName: "isFlashLoanRequest" as const,
+    })),
+  ];
 
   // ── Stage 1: independent multicall ───────────────────────────────
-  // request.owner() + factory.isRequest(...) for each accepted factory.
+  // request.owner() + the configured provenance call for each accepted factory.
   // Heterogeneous shape (one owner read, then a dynamic-length array of
   // factory reads) defeats viem's const-tuple inference. We type-erase
   // the contracts param and cast the results — runtime decoding is
@@ -341,7 +358,7 @@ async function fetchA1OnChain(
   // `allowFailure: true` so each slot is classified independently: a
   // deterministic failure of the client-supplied contract's `owner()`
   // is the client's fault (noFactory, 422), but a deterministic failure
-  // of an OPERATOR-configured factory's `isRequest()` must never be —
+  // of an OPERATOR-configured factory's provenance call must never be —
   // otherwise one misconfigured factory entry (EOA / wrong contract)
   // would silently convert every request on the chain into a cached
   // client-blamed 422.
@@ -351,10 +368,10 @@ async function fetchA1OnChain(
     stage1Results = (await ctx.client.multicall({
       contracts: [
         { address: requestContract, abi: requestAbi, functionName: "owner" },
-        ...factoriesArr.map((factory) => ({
+        ...factoryChecks.map(({ factory, abi, functionName }) => ({
           address: factory,
-          abi: requestFactoryAbi,
-          functionName: "isRequest" as const,
+          abi,
+          functionName,
           args: [requestContract] as const,
         })),
       ] as never,
@@ -405,9 +422,9 @@ async function fetchA1OnChain(
   }
   const owner = ownerSlot.result;
 
-  const factoryHits: Address[] = [];
+  const factoryHits = new Map<string, Address>();
   const failedFactories: Address[] = [];
-  for (const [i, factory] of factoriesArr.entries()) {
+  for (const [i, { factory, functionName }] of factoryChecks.entries()) {
     const slot = stage1Results[i + 1]!;
     if (slot.status === "failure") {
       // The factory address comes from OPERATOR configuration, not from
@@ -420,17 +437,16 @@ async function fetchA1OnChain(
       ctx.logger.error(
         { err: sanitizeErr(slot.error), factory, requestContract },
         isMulticallChunkFailure(slot.error)
-          ? "A.1: factory isRequest() read failed upstream (transport)"
-          : "A.1: accepted factory did not answer isRequest(); " +
-              "check the acceptedRequestFactories configuration",
+          ? "A.1: factory provenance read failed upstream (transport)"
+          : `A.1: accepted factory did not answer ${functionName}(); check its configuration`,
       );
       failedFactories.push(factory);
       continue;
     }
-    if (slot.result === true) factoryHits.push(factory);
+    if (slot.result === true) factoryHits.set(factory.toLowerCase(), factory);
   }
 
-  if (factoryHits.length === 0) {
+  if (factoryHits.size === 0) {
     if (failedFactories.length > 0) {
       // Without a definitive answer from every configured factory we
       // cannot distinguish "no factory deployed this contract" (client
@@ -456,9 +472,10 @@ async function fetchA1OnChain(
   // outcome to `tooOld` (role checks skipped under the default
   // disposition, and the wrong answer cached). Still operator-notable,
   // so log it.
-  if (factoryHits.length > 1) {
+  const matchedFactories = [...factoryHits.values()];
+  if (matchedFactories.length > 1) {
     ctx.logger.error(
-      { factories: factoryHits, requestContract },
+      { factories: matchedFactories, requestContract },
       "A.1: multiple accepted factories claim this contract; " +
         "scanning deployment against all of them — check the acceptedRequestFactories configuration",
     );
@@ -489,7 +506,7 @@ async function fetchA1OnChain(
   try {
     scanOutcome = await scanRoleHolders({
       client: ctx.client,
-      factories: factoryHits,
+      factories: matchedFactories,
       requestContract,
       latestBlock,
       blockRange: policy.eventScanBlockRange,
@@ -503,7 +520,7 @@ async function fetchA1OnChain(
     });
   } catch (e) {
     ctx.logger.error(
-      { err: sanitizeErr(e), requestContract, factories: factoryHits },
+      { err: sanitizeErr(e), requestContract, factories: matchedFactories },
       "A.1: role-events scan failed",
     );
     return Result.err(
@@ -520,7 +537,7 @@ async function fetchA1OnChain(
     // that the factory is still on the live policy.
     return Result.ok({
       kind: "tooOld",
-      factory: factoryHits[0]!,
+      factory: matchedFactories[0]!,
       owner,
       partialHolders: scanOutcome.partialHolders,
     });
@@ -530,7 +547,7 @@ async function fetchA1OnChain(
     // Prefer the factory that actually emitted the RequestCreated event;
     // fall back to the first hit when the scan resolved by reaching
     // block 0 without observing it.
-    factory: scanOutcome.deploymentFactory ?? factoryHits[0]!,
+    factory: scanOutcome.deploymentFactory ?? matchedFactories[0]!,
     owner,
     holders: scanOutcome.holders,
   });
@@ -565,8 +582,12 @@ function evaluateA1(
   // Treating a removed-from-policy factory as a factory-mismatch keeps
   // the failure reason discoverable across policy mutations without a
   // forced flush.
-  const accepted = policy.acceptedRequestFactories.get(chainId) ?? new Set<string>();
-  const acceptedLower = new Set([...accepted].map((s) => s.toLowerCase()));
+  const acceptedLower = new Set(
+    [
+      ...(policy.acceptedRequestFactories.get(chainId) ?? []),
+      ...(policy.acceptedFlashLoanRequestFactories?.get(chainId) ?? []),
+    ].map((s) => s.toLowerCase()),
+  );
   if (!acceptedLower.has(data.factory.toLowerCase())) {
     return [
       failed(

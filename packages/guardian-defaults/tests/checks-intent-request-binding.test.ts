@@ -28,6 +28,7 @@ import {
 import { scanRoleHolders } from "../src/checks/role-events.js";
 
 const FACTORY = "0xfaC70ffaC70ffaC70ffaC70ffaC70ffaC70ffaC0" as Address;
+const FLASH_LOAN_FACTORY = "0xf2729c9273acb2cb4503ab3d0d8e584e7f915007" as Address;
 const OTHER_FACTORY = "0x0000000000000000000000000000000000000aaa" as Address;
 const RC = "0xcccccccccccccccccccccccccccccccccccccccc" as Address;
 const OWNER = "0x000000000000000000000000000000000000000a" as Address;
@@ -87,10 +88,10 @@ function makeClient(args: {
     toBlock?: bigint;
   }) => Array<{
     address: Address;
-    eventName: "RolesUpdated" | "RequestCreated";
+    eventName: "RolesUpdated" | "RequestCreated" | "FlashLoanRequestCreated";
     blockNumber: bigint;
     logIndex: number;
-    args: { user?: Address; roles?: bigint; request?: Address };
+    args: { user?: Address; roles?: bigint; request?: Address; flashLoanRequest?: Address };
   }>;
   getLogsThrows?: Error;
   latestBlock?: bigint;
@@ -213,6 +214,48 @@ describe("buildIntentRequestBindingChecks", () => {
     const run = buildIntentRequestBindingChecks({ policy });
     const r = await run(ctx(stub.client), baseBody);
     expect(r.isOk()).toBe(true);
+  });
+
+  it("passes for an accepted Morpho flash-loan request factory", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 5_500n,
+      getLogs: () => [
+        {
+          address: FLASH_LOAN_FACTORY,
+          eventName: "FlashLoanRequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { flashLoanRequest: RC },
+        },
+        {
+          address: RC,
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 1,
+          args: { user: PULLER, roles: ROLE_PULLER },
+        },
+        {
+          address: RC,
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 2,
+          args: { user: CONSUMER, roles: ROLE_CONSUMER },
+        },
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({
+      policy: {
+        ...policy,
+        acceptedRequestFactories: new Map(),
+        acceptedFlashLoanRequestFactories: new Map([[1, new Set<string>([FLASH_LOAN_FACTORY])]]),
+      },
+    });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    expect(result.isOk()).toBe(true);
+    expect(stub.multicalls).toEqual([{ functionNames: ["owner", "isFlashLoanRequest"] }]);
   });
 
   it("fails when no accepted factory recognises the request", async () => {
