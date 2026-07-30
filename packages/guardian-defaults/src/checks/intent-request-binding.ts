@@ -38,6 +38,9 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
  *  - `acceptedFlashLoanRequestFactories` — Morpho flash-loan request
  *    factories, checked with `isFlashLoanRequest(addr)`.
  *
+ *  - `acceptedFlashLoanRequestExecutors` — every `_ROLE_0` executor on
+ *    a Morpho flash-loan request MUST be on this set.
+ *
  *  - `acceptedOwners` — `Ownable.owner()` on the request contract MUST
  *    be on this set.
  *
@@ -81,6 +84,7 @@ export type IntentRequestBindingPolicy = {
   readonly maxDeadlineSecondsAhead: number;
   readonly acceptedRequestFactories: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedFlashLoanRequestFactories?: ReadonlyMap<number, ReadonlySet<string>>;
+  readonly acceptedFlashLoanRequestExecutors?: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedOwners: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedPullers: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedConsumers: ReadonlyMap<number, ReadonlySet<string>>;
@@ -582,11 +586,13 @@ function evaluateA1(
   // Treating a removed-from-policy factory as a factory-mismatch keeps
   // the failure reason discoverable across policy mutations without a
   // forced flush.
+  const acceptedFlashLoanFactories = new Set(
+    [...(policy.acceptedFlashLoanRequestFactories?.get(chainId) ?? [])].map((s) => s.toLowerCase()),
+  );
   const acceptedLower = new Set(
-    [
-      ...(policy.acceptedRequestFactories.get(chainId) ?? []),
-      ...(policy.acceptedFlashLoanRequestFactories?.get(chainId) ?? []),
-    ].map((s) => s.toLowerCase()),
+    [...(policy.acceptedRequestFactories.get(chainId) ?? []), ...acceptedFlashLoanFactories].map(
+      (s) => s.toLowerCase(),
+    ),
   );
   if (!acceptedLower.has(data.factory.toLowerCase())) {
     return [
@@ -608,6 +614,24 @@ function evaluateA1(
     accepted: policy.acceptedOwners.get(chainId) ?? new Set<string>(),
     addressLike: true,
   });
+
+  if (acceptedFlashLoanFactories.has(data.factory.toLowerCase())) {
+    const description = "executor role on flash-loan request is held only by accepted parties";
+    const executorCheck =
+      data.kind === "tooOld"
+        ? checkPartialHolders({
+            description,
+            holders: holdersOf(data.partialHolders ?? new Map<Address, bigint>(), ROLE_PULLER),
+            accepted: policy.acceptedFlashLoanRequestExecutors?.get(chainId) ?? new Set<string>(),
+            disposition: policy.onLookbackExhausted ?? "skip",
+          })
+        : checkSubset({
+            description,
+            holders: holdersOf(data.holders, ROLE_PULLER),
+            accepted: policy.acceptedFlashLoanRequestExecutors?.get(chainId) ?? new Set<string>(),
+          });
+    return [factoryCheck, ownerCheck, executorCheck, deadlineCheck];
+  }
 
   let pullerCheck: CheckEntry;
   let consumerCheck: CheckEntry;

@@ -56,6 +56,7 @@ Optional env:
 - `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` default `1000000`
 - `GUARDIAN_MAX_NONCE_ABOVE_FLOOR` default `100`, for request-whitelisting nonce windows
 - `GUARDIAN_FLASH_LOAN_REQUEST_FACTORIES` optional `chainId=addr,addr;chainId=addr`
+- `GUARDIAN_FLASH_LOAN_REQUEST_EXECUTORS` optional `chainId=addr,addr;chainId=addr`
 - `GUARDIAN_ACCEPTED_WHITELIST_BOOKS` optional `chainId=addr,addr;chainId=addr`
 - `GUARDIAN_SWAP_PRICE_TOLERANCE_BPS` default `1`
 
