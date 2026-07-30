@@ -17,6 +17,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 
 import {
+  DEFAULT_GUARDIAN_TIMEOUTS,
   makeSignIntentFundBinding,
   makeSignIntentRequestBinding,
   makeSignIntentSwap,
@@ -64,6 +65,14 @@ export function buildGuardianFromEnv(
   );
   const requestBindingPolicy = {
     maxDeadlineSecondsAhead,
+    // Request contracts vetted out of band: no provenance, owner, or
+    // role verification runs for them. Unset = nothing is bypassed.
+    trustedRequestContracts: env.GUARDIAN_TRUSTED_REQUEST_CONTRACTS?.trim()
+      ? parseAddressMap(
+          env.GUARDIAN_TRUSTED_REQUEST_CONTRACTS,
+          "GUARDIAN_TRUSTED_REQUEST_CONTRACTS",
+        )
+      : undefined,
     acceptedRequestFactories: parseAddressMap(
       required(env, "GUARDIAN_REQUEST_FACTORIES"),
       "GUARDIAN_REQUEST_FACTORIES",
@@ -110,6 +119,14 @@ export function buildGuardianFromEnv(
       build: env.BUILD_ID ?? "0.1.0",
       guardianSigner: signer.guardianSigner,
       supportedChains,
+    },
+    // Budget for one whole validate-and-sign call. The library default
+    // (6 s) is sized for an HTTP shell, where the deadlines compose under
+    // Bun.serve's idle timeout; the coordinator serves nobody, so a deep
+    // role-events scan — or a §A.4 batch of them — can legitimately need
+    // far more than that before the signer is even reached.
+    timeouts: {
+      signMs: positiveInt(env.GUARDIAN_SIGN_TIMEOUT_MS, DEFAULT_GUARDIAN_TIMEOUTS.signMs),
     },
     getChainClient: (chainId) => {
       const client = clients.get(chainId);

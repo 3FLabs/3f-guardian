@@ -198,6 +198,69 @@ describe("buildRequestWhitelistingChecks", () => {
     }
   });
 
+  it("skips the per-contract §A.1 reads for trusted request contracts in a whitelist batch", async () => {
+    const stub = makeClient({
+      multicallResponses: [
+        // RC2 stage-1 only: RC1 is trusted, so its multicall never runs.
+        [OWNER, true],
+        // whitelist book stage: floor + consumed
+        [10n, false],
+      ],
+      getLogs: (params) => ((params.address ?? []).includes(RC2) ? happyEvents(RC2) : []),
+      latestBlock: 5_500n,
+    });
+
+    const r = await buildRequestWhitelistingChecks({
+      policy: { ...policy, trustedRequestContracts: new Map([[1, new Set<string>([RC1])]]) },
+      guardianSigner: GUARDIAN,
+    })(ctx(stub.client), {
+      chainId: 1,
+      whitelistBook: BOOK,
+      operation: "whitelist",
+      requestContracts: [RC1, RC2],
+      nonce: "100",
+      deadline: 1_700_000_500,
+    });
+
+    if (r.isErr()) throw r.error;
+    // The trusted contract keeps its per-contract suffix so the §6.4.1
+    // array still says which contract was bypassed, and which checks it
+    // stood in for.
+    expect(r.value.filter((c) => c.description.endsWith(`(for ${RC1})`))).toEqual([
+      {
+        description: `request contract is on the trusted-request-contracts list (for ${RC1})`,
+        passed: true,
+        skipped: false,
+      },
+      {
+        description: `request contract was deployed by an accepted factory (for ${RC1})`,
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: `owner of request contract is on the accepted-owners list (for ${RC1})`,
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: `puller role on request contract is held only by accepted parties (for ${RC1})`,
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: `consumer role on request contract is held only by accepted parties (for ${RC1})`,
+        passed: true,
+        skipped: true,
+      },
+    ]);
+    // RC2 is untrusted and still fully validated.
+    expect(r.value.filter((c) => c.description.endsWith(`(for ${RC2})`))).toHaveLength(4);
+    expect(stub.multicalls.map((m) => m.addresses)).toEqual([
+      [RC2.toLowerCase(), FACTORY.toLowerCase()],
+      [BOOK.toLowerCase(), BOOK.toLowerCase()],
+    ]);
+  });
+
   it("unwhitelist op runs only nonce + deadline checks", async () => {
     const stub = makeClient({
       multicallResponses: [[10n, false]],

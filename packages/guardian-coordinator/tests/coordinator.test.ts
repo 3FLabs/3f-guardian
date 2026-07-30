@@ -464,6 +464,7 @@ describe("guardian coordinator", () => {
       GUARDIAN_SIGNER_KEY: `0x${"11".repeat(32)}`,
       GUARDIAN_FLASH_LOAN_REQUEST_FACTORIES: "1=0xf2729c9273acb2cb4503ab3d0d8e584e7f915007",
       GUARDIAN_FLASH_LOAN_REQUEST_EXECUTORS: "1=0x95026A338084241E739250f4F9d2F5745dE81bDd",
+      GUARDIAN_TRUSTED_REQUEST_CONTRACTS: "1=0x95026A338084241E739250f4F9d2F5745dE81bDd",
       GUARDIAN_SWAP_PRICE_TOLERANCE_BPS: "0",
     });
 
@@ -641,6 +642,31 @@ describe("guardian coordinator", () => {
         GUARDIAN_REQUEST_FACTORIES: "1=0x52908400098527886E0F7030069857D2E4169Ee7",
       }),
     ).toThrow(/invalid address/);
+    expect(() =>
+      buildCliGuardianFromEnv({
+        ...CLI_ENV,
+        GUARDIAN_SIGNER_KEY: `0x${"11".repeat(32)}`,
+        GUARDIAN_TRUSTED_REQUEST_CONTRACTS: "1=0x52908400098527886E0F7030069857D2E4169Ee7",
+      }),
+    ).toThrow(/GUARDIAN_TRUSTED_REQUEST_CONTRACTS contains invalid address/);
+  });
+
+  it("makes the validate-and-sign budget configurable", () => {
+    const env = { ...CLI_ENV, GUARDIAN_SIGNER_KEY: `0x${"11".repeat(32)}` };
+
+    // Unset ⇒ the library default, so raising the budget is opt-in.
+    expect(buildCliGuardianFromEnv(env).timeouts?.signMs).toBe(6_000);
+    expect(
+      buildCliGuardianFromEnv({ ...env, GUARDIAN_SIGN_TIMEOUT_MS: "120000" }).timeouts?.signMs,
+    ).toBe(120_000);
+    // A zero / negative / fractional budget would time every signing
+    // request out instantly — reject it at construction, not per request.
+    expect(() => buildCliGuardianFromEnv({ ...env, GUARDIAN_SIGN_TIMEOUT_MS: "0" })).toThrow(
+      /positive integer/,
+    );
+    expect(() => buildCliGuardianFromEnv({ ...env, GUARDIAN_SIGN_TIMEOUT_MS: "-1" })).toThrow(
+      /positive integer/,
+    );
   });
 });
 
