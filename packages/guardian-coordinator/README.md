@@ -58,6 +58,18 @@ Optional env:
 - `GUARDIAN_FLASH_LOAN_REQUEST_FACTORIES` optional `chainId=addr,addr;chainId=addr`
 - `GUARDIAN_FLASH_LOAN_REQUEST_EXECUTORS` optional `chainId=addr,addr;chainId=addr`
 - `GUARDIAN_ACCEPTED_WHITELIST_BOOKS` optional `chainId=addr,addr;chainId=addr`
+- `GUARDIAN_TRUSTED_REQUEST_CONTRACTS` optional `chainId=addr,addr;chainId=addr`.
+  Request contracts on this list skip factory-provenance, owner, and puller / consumer /
+  executor role verification for both `set_request` and `request_whitelisting`, with no
+  on-chain read at all — only the deadline check still applies. Unset (the default)
+  validates every request contract. The Guardian will sign for a listed contract
+  whatever its owner and role holders turn out to be, including grants made after it was
+  listed, so keep it to contracts whose configuration is under the same control as the
+  Guardian's own key material. Every bypass is logged at warn level.
+- `GUARDIAN_SIGN_TIMEOUT_MS` default `6000`; budget for one whole validate-and-sign
+  call, including the on-chain reads. Raise it when role-events scans over a wide
+  `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` — or `request_whitelisting` batches, which
+  scan per request contract — need longer than the default.
 - `GUARDIAN_SWAP_PRICE_TOLERANCE_BPS` default `1`
 
 For `remote_http`, the coordinator sends:

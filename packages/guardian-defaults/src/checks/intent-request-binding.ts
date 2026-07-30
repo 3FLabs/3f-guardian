@@ -44,6 +44,22 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
  *  - `acceptedOwners` — `Ownable.owner()` on the request contract MUST
  *    be on this set.
  *
+ *  - `trustedRequestContracts` — request contracts the operator has
+ *    vetted out of band. When `requestContract` is on this set §A.1
+ *    SHORT-CIRCUITS before any on-chain read: the factory, owner and role
+ *    entries are all emitted as `skipped:true`, and no RPC is issued at
+ *    all (no multicall, no `getBlockNumber`, no `getLogs`). Only the
+ *    deadline check still applies. Nothing is read, so the skipped role
+ *    entries are always the puller / consumer pair — a bypassed contract
+ *    is never classified as a flash-loan request, and its executor role
+ *    goes unverified too. This is a deliberate trust delegation, not an
+ *    optimisation: the Guardian will sign for the contract whatever its
+ *    provenance, owner, and role holders turn out to be — including
+ *    grants made after it was added to the set. Keep it to contracts
+ *    whose configuration is under the same control as the Guardian's own
+ *    key material, and prefer the accepted-set checks everywhere else.
+ *    Omitted = every request contract is fully validated.
+ *
  *  - `acceptedPullers` / `acceptedConsumers` — every address holding
  *    `_ROLE_PULLER` (resp. `_ROLE_CONSUMER`) on the request contract,
  *    derived from a `RolesUpdated` event replay, MUST be on these
@@ -82,6 +98,7 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
  */
 export type IntentRequestBindingPolicy = {
   readonly maxDeadlineSecondsAhead: number;
+  readonly trustedRequestContracts?: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedRequestFactories: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedFlashLoanRequestFactories?: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedFlashLoanRequestExecutors?: ReadonlyMap<number, ReadonlySet<string>>;
@@ -213,6 +230,11 @@ export type A1Deps = {
  *   4. consumer role on request contract is held only by accepted parties (422)
  *   5. deadline within MAX_DEADLINE_SECONDS_AHEAD of now              (422)
  *
+ * A `requestContract` on the policy's optional `trustedRequestContracts`
+ * set short-circuits ahead of both stages below: checks 1–4 are emitted
+ * as `skipped:true`, no RPC is issued, and only the deadline check runs.
+ * See {@link IntentRequestBindingPolicy} for what that delegation costs.
+ *
  * Stage 1 — single multicall (`allowFailure: true`):
  *   - `request.owner()`
  *   - the configured provenance check for each accepted factory
@@ -289,6 +311,22 @@ export async function runA1(
     deadline,
     maxSecondsAhead: policy.maxDeadlineSecondsAhead,
   });
+
+  // ── Trusted-request-contract short-circuit ────────────────────────
+  // Ahead of the cache lookup and every RPC: the operator has vetted
+  // this contract out of band, so there is nothing left to read. The
+  // deadline check still runs — it bounds the signature's validity
+  // window rather than the contract's configuration, and no entry on
+  // this set is trusted to widen it. Logged at warn because this is the
+  // one path where the Guardian signs without verifying provenance,
+  // owner, or role holders.
+  if (isTrustedRequestContract(requestContract, chainId, policy)) {
+    ctx.logger.warn(
+      { requestContract, chainId },
+      "A.1: request contract is on the trusted-request-contracts list; skipping all on-chain checks",
+    );
+    return rollupA1(trustedRequestContractChecks(deadlineCheck));
+  }
 
   const cacheKey = `${chainId}:${requestContract.toLowerCase()}`;
 
@@ -669,6 +707,43 @@ function evaluateA1(
   }
 
   return [factoryCheck, ownerCheck, pullerCheck, consumerCheck, deadlineCheck];
+}
+
+/**
+ * True iff `requestContract` is on the policy's `trustedRequestContracts`
+ * set for `chainId` (case-insensitive, per the §A.* address convention).
+ * An absent set trusts nothing, so the short-circuit stays off unless an
+ * operator explicitly populates it.
+ */
+function isTrustedRequestContract(
+  requestContract: Address,
+  chainId: number,
+  policy: IntentRequestBindingPolicy,
+): boolean {
+  const trusted = policy.trustedRequestContracts?.get(chainId);
+  if (trusted === undefined) return false;
+  const target = requestContract.toLowerCase();
+  for (const candidate of trusted) {
+    if (candidate.toLowerCase() === target) return true;
+  }
+  return false;
+}
+
+/**
+ * §A.1 entries for a trusted request contract: the trust entry passes and
+ * every check it stands in for is emitted as `skipped:true`, so the
+ * §6.4.1 array still says which verifications did not happen. The
+ * deadline entry is the caller's, evaluated as usual.
+ */
+function trustedRequestContractChecks(deadlineCheck: CheckEntry): readonly CheckEntry[] {
+  return [
+    passed("request contract is on the trusted-request-contracts list"),
+    skipped("request contract was deployed by an accepted factory"),
+    skipped("owner of request contract is on the accepted-owners list"),
+    skipped("puller role on request contract is held only by accepted parties"),
+    skipped("consumer role on request contract is held only by accepted parties"),
+    deadlineCheck,
+  ];
 }
 
 /**
