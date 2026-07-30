@@ -235,13 +235,6 @@ describe("buildIntentRequestBindingChecks", () => {
           logIndex: 1,
           args: { user: PULLER, roles: ROLE_PULLER },
         },
-        {
-          address: RC,
-          eventName: "RolesUpdated",
-          blockNumber: 5_000n,
-          logIndex: 2,
-          args: { user: CONSUMER, roles: ROLE_CONSUMER },
-        },
       ],
     });
     const run = buildIntentRequestBindingChecks({
@@ -249,12 +242,19 @@ describe("buildIntentRequestBindingChecks", () => {
         ...policy,
         acceptedRequestFactories: new Map(),
         acceptedFlashLoanRequestFactories: new Map([[1, new Set<string>([FLASH_LOAN_FACTORY])]]),
+        acceptedFlashLoanRequestExecutors: new Map([[1, new Set<string>([PULLER])]]),
       },
     });
 
     const result = await run(ctx(stub.client), baseBody);
 
-    expect(result.isOk()).toBe(true);
+    if (result.isErr()) throw result.error;
+    expect(result.value.map((check) => check.description)).toEqual([
+      "request contract was deployed by an accepted factory",
+      "owner of request contract is on the accepted-owners list",
+      "executor role on flash-loan request is held only by accepted parties",
+      "deadline within MAX_DEADLINE_SECONDS_AHEAD of now",
+    ]);
     expect(stub.multicalls).toEqual([{ functionNames: ["owner", "isFlashLoanRequest"] }]);
   });
 

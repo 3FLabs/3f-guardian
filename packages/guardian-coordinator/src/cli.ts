@@ -74,6 +74,12 @@ export function buildGuardianFromEnv(
           "GUARDIAN_FLASH_LOAN_REQUEST_FACTORIES",
         )
       : undefined,
+    acceptedFlashLoanRequestExecutors: env.GUARDIAN_FLASH_LOAN_REQUEST_EXECUTORS?.trim()
+      ? parseAddressMap(
+          env.GUARDIAN_FLASH_LOAN_REQUEST_EXECUTORS,
+          "GUARDIAN_FLASH_LOAN_REQUEST_EXECUTORS",
+        )
+      : undefined,
     acceptedOwners: parseAddressMap(
       required(env, "GUARDIAN_REQUEST_OWNERS"),
       "GUARDIAN_REQUEST_OWNERS",

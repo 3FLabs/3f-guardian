@@ -3,4 +3,4 @@
 "@3flabs/guardian-coordinator": patch
 ---
 
-Validate Morpho flash-loan requests through their dedicated factory interface.
+Validate Morpho flash-loan request provenance and executor roles through their dedicated policy.
