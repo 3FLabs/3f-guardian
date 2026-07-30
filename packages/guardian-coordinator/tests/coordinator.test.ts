@@ -462,6 +462,7 @@ describe("guardian coordinator", () => {
     const guardian = buildCliGuardianFromEnv({
       ...CLI_ENV,
       GUARDIAN_SIGNER_KEY: `0x${"11".repeat(32)}`,
+      GUARDIAN_FLASH_LOAN_REQUEST_FACTORIES: "1=0xf2729c9273acb2cb4503ab3d0d8e584e7f915007",
       GUARDIAN_SWAP_PRICE_TOLERANCE_BPS: "0",
     });
 
