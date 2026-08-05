@@ -7,6 +7,7 @@
   "workspaces": ["packages/*"],
   "overrides": {
     "brace-expansion": "5.0.8",
+    "elysia": "1.4.29",
     "tar": "7.5.19",
     "ws": "8.21.1"
   },

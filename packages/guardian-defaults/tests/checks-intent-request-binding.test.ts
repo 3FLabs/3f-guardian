@@ -28,6 +28,7 @@ import {
 import { scanRoleHolders } from "../src/checks/role-events.js";
 
 const FACTORY = "0xfaC70ffaC70ffaC70ffaC70ffaC70ffaC70ffaC0" as Address;
+const FLASH_LOAN_FACTORY = "0xf2729c9273acb2cb4503ab3d0d8e584e7f915007" as Address;
 const OTHER_FACTORY = "0x0000000000000000000000000000000000000aaa" as Address;
 const RC = "0xcccccccccccccccccccccccccccccccccccccccc" as Address;
 const OWNER = "0x000000000000000000000000000000000000000a" as Address;
@@ -47,6 +48,16 @@ const policy: IntentRequestBindingPolicy = {
   acceptedConsumers: new Map([[1, new Set<string>([CONSUMER])]]),
   eventScanBlockRange: 1_000n,
   eventScanMaxLookbackBlocks: 5_000n,
+};
+
+/**
+ * Same accepted sets, plus RC on the trusted-request-contracts list. The
+ * accepted sets are left intact so the tests show the short-circuit
+ * winning over checks that would otherwise run, not merely filling a gap.
+ */
+const trustedPolicy: IntentRequestBindingPolicy = {
+  ...policy,
+  trustedRequestContracts: new Map([[1, new Set<string>([RC])]]),
 };
 
 const baseBody = {
@@ -87,10 +98,10 @@ function makeClient(args: {
     toBlock?: bigint;
   }) => Array<{
     address: Address;
-    eventName: "RolesUpdated" | "RequestCreated";
+    eventName: "RolesUpdated" | "RequestCreated" | "FlashLoanRequestCreated";
     blockNumber: bigint;
     logIndex: number;
-    args: { user?: Address; roles?: bigint; request?: Address };
+    args: { user?: Address; roles?: bigint; request?: Address; flashLoanRequest?: Address };
   }>;
   getLogsThrows?: Error;
   latestBlock?: bigint;
@@ -213,6 +224,48 @@ describe("buildIntentRequestBindingChecks", () => {
     const run = buildIntentRequestBindingChecks({ policy });
     const r = await run(ctx(stub.client), baseBody);
     expect(r.isOk()).toBe(true);
+  });
+
+  it("passes for an accepted Morpho flash-loan request factory", async () => {
+    const stub = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 5_500n,
+      getLogs: () => [
+        {
+          address: FLASH_LOAN_FACTORY,
+          eventName: "FlashLoanRequestCreated",
+          blockNumber: 5_000n,
+          logIndex: 0,
+          args: { flashLoanRequest: RC },
+        },
+        {
+          address: RC,
+          eventName: "RolesUpdated",
+          blockNumber: 5_000n,
+          logIndex: 1,
+          args: { user: PULLER, roles: ROLE_PULLER },
+        },
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({
+      policy: {
+        ...policy,
+        acceptedRequestFactories: new Map(),
+        acceptedFlashLoanRequestFactories: new Map([[1, new Set<string>([FLASH_LOAN_FACTORY])]]),
+        acceptedFlashLoanRequestExecutors: new Map([[1, new Set<string>([PULLER])]]),
+      },
+    });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    if (result.isErr()) throw result.error;
+    expect(result.value.map((check) => check.description)).toEqual([
+      "request contract was deployed by an accepted factory",
+      "owner of request contract is on the accepted-owners list",
+      "executor role on flash-loan request is held only by accepted parties",
+      "deadline within MAX_DEADLINE_SECONDS_AHEAD of now",
+    ]);
+    expect(stub.multicalls).toEqual([{ functionNames: ["owner", "isFlashLoanRequest"] }]);
   });
 
   it("fails when no accepted factory recognises the request", async () => {
@@ -1104,6 +1157,116 @@ describe("buildIntentRequestBindingChecks", () => {
     const entry = await cache.get(`1:${RC.toLowerCase()}`);
     expect(entry?.kind).toBe("resolved");
     if (entry?.kind === "resolved") expect(entry.factory).toBe(OTHER_FACTORY);
+  });
+
+  it("skips every on-chain check for a trusted request contract", async () => {
+    // Any RPC would throw "unexpected multicall": the short-circuit must
+    // land before the reads, not merely ignore their results.
+    const stub = makeClient({});
+    const run = buildIntentRequestBindingChecks({ policy: trustedPolicy });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    if (result.isErr()) throw result.error;
+    expect(result.value).toEqual([
+      {
+        description: "request contract is on the trusted-request-contracts list",
+        passed: true,
+        skipped: false,
+      },
+      {
+        description: "request contract was deployed by an accepted factory",
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: "owner of request contract is on the accepted-owners list",
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: "puller role on request contract is held only by accepted parties",
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: "consumer role on request contract is held only by accepted parties",
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: "deadline within MAX_DEADLINE_SECONDS_AHEAD of now",
+        passed: true,
+        skipped: false,
+      },
+    ]);
+    expect(stub.multicalls).toEqual([]);
+    expect(stub.getBlockNumberCalls).toBe(0);
+    expect(stub.getLogsCalls).toBe(0);
+  });
+
+  it("still enforces the deadline for a trusted request contract", async () => {
+    const stub = makeClient({});
+    const run = buildIntentRequestBindingChecks({ policy: trustedPolicy });
+
+    const result = await run(ctx(stub.client), { ...baseBody, deadline: 1_700_001_000 });
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) {
+      expect(result.error).toBeInstanceOf(ValidationFailedError);
+      const deadline = (result.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("deadline"),
+      );
+      expect(deadline?.passed).toBe(false);
+    }
+  });
+
+  it("does not consult or populate the cache for a trusted request contract", async () => {
+    const stub = makeClient({});
+    const cache = inMemoryCache(zA1OnChainData);
+    const run = buildIntentRequestBindingChecks({ policy: trustedPolicy, cache });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    expect(result.isOk()).toBe(true);
+    // Nothing was read, so there is nothing to amortise — and a bypass
+    // must never leave an entry that outlives the policy that granted it.
+    expect(await cache.get(`1:${RC.toLowerCase()}`)).toBeUndefined();
+  });
+
+  it("scopes the trusted set per chain and ignores address case", async () => {
+    const otherChainStub = makeClient({ multicallResponses: [[OWNER, false]] });
+    const run = buildIntentRequestBindingChecks({
+      policy: {
+        ...policy,
+        // Listed for chain 1 only, in the opposite case to `baseBody`.
+        trustedRequestContracts: new Map([[1, new Set<string>([RC.toUpperCase()])]]),
+      },
+    });
+
+    // Chain 8453 is not covered by the entry, so the full §A.1 path runs
+    // and fails on the factory check.
+    const other = await run(ctx(otherChainStub.client), { ...baseBody, chainId: 8453 });
+    expect(other.isErr()).toBe(true);
+    expect(otherChainStub.multicalls).toHaveLength(1);
+
+    const trusted = await run(ctx(makeClient({}).client), baseBody);
+    expect(trusted.isOk()).toBe(true);
+  });
+
+  it("does not short-circuit a request contract that is not on the trusted set", async () => {
+    const stub = makeClient({ multicallResponses: [[OWNER, false]] });
+    const run = buildIntentRequestBindingChecks({
+      policy: {
+        ...policy,
+        trustedRequestContracts: new Map([[1, new Set<string>([OTHER_FACTORY])]]),
+      },
+    });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    expect(result.isErr()).toBe(true);
+    expect(stub.multicalls).toHaveLength(1);
   });
 });
 

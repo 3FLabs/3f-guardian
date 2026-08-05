@@ -539,6 +539,14 @@ limit equal to the configured range never reject a chunk.
   fails the §A.1 / §A.4 checks (422). Partial data can only reject, never approve. The
   residual disposition is governed by `onLookbackExhausted`: `"skip"` (default) emits the
   role checks as skipped, `"fail"` fails closed (422).
+- **Trusted request contracts** — `trustedRequestContracts` (optional) short-circuits
+  §A.1 for a listed `requestContract` before the cache lookup and every RPC: the factory,
+  owner, and puller / consumer / executor role checks are emitted as skipped, nothing is
+  read on chain, and only the deadline check still applies. §A.4 whitelist ops inherit it
+  per request contract, so a batch of listed contracts costs no scan at all. This
+  delegates provenance, ownership, and role configuration to whoever controls the listed
+  contract — including grants made after it was listed — so treat the set as an extension
+  of the Guardian's own trust boundary; every bypass is logged at warn level.
 - **Scan budget** — `eventScanDeadlineMs` (optional) bounds a single scan's wall clock;
   when exceeded the request fails `503 upstream_unavailable` instead of holding the
   handler indefinitely.
@@ -572,6 +580,7 @@ case-insensitive.
 ```ts
 type IntentRequestBindingPolicy = {
   maxDeadlineSecondsAhead: number;
+  trustedRequestContracts?: ReadonlyMap<number, ReadonlySet<string>>; // listed ⇒ skip every on-chain check
   acceptedRequestFactories: ReadonlyMap<number, ReadonlySet<string>>;
   acceptedOwners:           ReadonlyMap<number, ReadonlySet<string>>;
   acceptedPullers:          ReadonlyMap<number, ReadonlySet<string>>;

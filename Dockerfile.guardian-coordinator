@@ -26,11 +26,11 @@ COPY packages/guardian/package.json packages/guardian/package.json
 COPY packages/guardian-defaults/package.json packages/guardian-defaults/package.json
 COPY packages/guardian-coordinator/package.json packages/guardian-coordinator/package.json
 COPY packages/guardian-test-fixtures/package.json packages/guardian-test-fixtures/package.json
-RUN bun install --frozen-lockfile --production
+RUN bun install --frozen-lockfile --production --filter @3flabs/guardian-coordinator
 
 COPY --from=build /app/packages/guardian/dist packages/guardian/dist
 COPY --from=build /app/packages/guardian-defaults/dist packages/guardian-defaults/dist
 COPY --from=build /app/packages/guardian-coordinator/dist packages/guardian-coordinator/dist
 
-USER bun
+USER 1000:1000
 CMD ["bun", "packages/guardian-coordinator/dist/cli.js"]
