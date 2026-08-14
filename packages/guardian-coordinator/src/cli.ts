@@ -477,16 +477,39 @@ function nonNegativeInt(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
-async function main(): Promise<void> {
-  await runGuardianCoordinator({
-    ...loadCoordinatorConfig(process.env),
-    guardian: buildGuardianFromEnv(process.env),
+/**
+ * Fork-owned lifecycle lines, shaped like the heartbeat. Their serialized
+ * form is a monitoring contract pinned by tests — do not change casually.
+ */
+export function startupLine(guardian: CoordinatorGuardian): string {
+  return JSON.stringify({
+    level: "info",
+    event: "guardian.startup",
+    build: guardian.metadata.build,
+    chains: guardian.metadata.supportedChains,
   });
+}
+
+export function fatalLine(error: unknown): string {
+  return JSON.stringify({
+    level: "fatal",
+    event: "guardian.fatal",
+    err: error instanceof Error ? error.message : String(error),
+    // Appended last so the prefix monitoring matches on stays stable.
+    ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
+  });
+}
+
+async function main(): Promise<void> {
+  const config = loadCoordinatorConfig(process.env);
+  const guardian = buildGuardianFromEnv(process.env);
+  console.log(startupLine(guardian));
+  await runGuardianCoordinator({ ...config, guardian });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(fatalLine(error));
     process.exitCode = 1;
   });
 }

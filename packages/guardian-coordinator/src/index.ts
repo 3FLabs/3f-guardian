@@ -19,6 +19,7 @@ import { z } from "zod";
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_PAGE_SIZE = 100;
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const TOKEN_ID = "guardian-coordinator";
 const TOKEN_INFO = {
   tokenId: TOKEN_ID,
@@ -52,6 +53,7 @@ export type CoordinatorConnectionConfig = {
   pageSize: number;
   chainIds?: Set<number>;
   facilities?: Set<string>;
+  requestTimeoutMs?: number;
 };
 
 export type GuardianCoordinatorOptions = CoordinatorConnectionConfig & {
@@ -98,28 +100,64 @@ export function loadCoordinatorConfig(
     coordinatorApiKey: required(env, "COORDINATOR_API_KEY"),
     pollIntervalMs: positiveInt(env.POLL_INTERVAL_MS, DEFAULT_POLL_INTERVAL_MS),
     pageSize: positiveInt(env.PAGE_SIZE, DEFAULT_PAGE_SIZE),
+    requestTimeoutMs: positiveInt(env.REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS),
     chainIds: numberSet(env.CHAIN_IDS),
     facilities: stringSet(env.FACILITIES),
   };
 }
 
+export type PollCycleStats = {
+  fetched: number;
+  signed: number;
+  skipped: number;
+  failed: number;
+};
+
 export async function runGuardianCoordinator(options: GuardianCoordinatorOptions): Promise<void> {
-  const logger = options.logger ?? console;
   for (;;) {
-    try {
-      await runGuardianCoordinatorOnce(options);
-    } catch (error) {
-      logger.error(
-        `guardian coordinator poll failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    await runGuardianCoordinatorCycle(options);
     await sleep(options.pollIntervalMs);
   }
 }
 
+/**
+ * One poll cycle plus its heartbeat line. The heartbeat is emitted even
+ * when the poll throws (`ok: false`): it signals the loop is alive, not
+ * that it succeeded, so a missing-heartbeat alert fires only when the
+ * process is dead or wedged. The serialized shape is a monitoring
+ * contract pinned by a test — do not change it casually.
+ */
+export async function runGuardianCoordinatorCycle(
+  options: GuardianCoordinatorOptions,
+): Promise<PollCycleStats> {
+  const logger = options.logger ?? console;
+  const startedAt = Date.now();
+  const stats: PollCycleStats = { fetched: 0, signed: 0, skipped: 0, failed: 0 };
+  let ok = true;
+  try {
+    await runGuardianCoordinatorOnce(options, stats);
+  } catch (error) {
+    ok = false;
+    logger.error(
+      `guardian coordinator poll failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  logger.log(
+    JSON.stringify({
+      level: "info",
+      event: "guardian.heartbeat",
+      ok,
+      ...stats,
+      durationMs: Date.now() - startedAt,
+    }),
+  );
+  return stats;
+}
+
 export async function runGuardianCoordinatorOnce(
   options: GuardianCoordinatorOptions,
-): Promise<void> {
+  stats: PollCycleStats = { fetched: 0, signed: 0, skipped: 0, failed: 0 },
+): Promise<PollCycleStats> {
   const fetcher = options.fetcher ?? fetch;
   const logger = options.logger ?? console;
 
@@ -133,20 +171,27 @@ export async function runGuardianCoordinatorOnce(
       if (filter.facility !== undefined) url.searchParams.set("facility", filter.facility);
 
       const requests = zSigningRequestPage.parse(
-        await requestJson(fetcher, "GET", url.toString(), {
-          headers: { "x-api-key": options.coordinatorApiKey },
-        }),
+        await requestJson(
+          fetcher,
+          "GET",
+          url.toString(),
+          { headers: { "x-api-key": options.coordinatorApiKey } },
+          options.requestTimeoutMs,
+        ),
       );
+      stats.fetched += requests.items.length;
 
       for (const item of requests.items) {
         const row = zSigningRequest.safeParse(item);
         if (!row.success) {
+          stats.failed++;
           logger.error(`skipping malformed guardian signing request: ${row.error.message}`);
           continue;
         }
         const request = row.data;
 
         if (request.mySubmission !== null) {
+          stats.skipped++;
           continue;
         }
 
@@ -167,6 +212,7 @@ export async function runGuardianCoordinatorOnce(
             (options.chainIds && !options.chainIds.has(parsed.body.chainId)) ||
             (options.facilities && !options.facilities.has(target.address.toLowerCase()))
           ) {
+            stats.skipped++;
             continue;
           }
 
@@ -182,9 +228,12 @@ export async function runGuardianCoordinatorOnce(
               },
               body: JSON.stringify({ chainId: parsed.body.chainId, signature: signed.signature }),
             },
+            options.requestTimeoutMs,
           );
+          stats.signed++;
           logger.log(`submitted guardian signature for ${request.id}`);
         } catch (error) {
+          stats.failed++;
           logger.error(
             `failed guardian signing request ${request.id}: ${
               error instanceof Error ? error.message : String(error)
@@ -196,6 +245,7 @@ export async function runGuardianCoordinatorOnce(
       if (requests.items.length === 0 || page * requests.pageSize >= requests.total) break;
     }
   }
+  return stats;
 }
 
 async function signWithGuardian(
@@ -276,8 +326,13 @@ async function requestJson(
   method: string,
   url: string,
   init: RequestInit = {},
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<unknown> {
-  const response = await fetcher(url, { ...init, method });
+  const response = await fetcher(url, {
+    ...init,
+    method,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
   const text = await response.text();
   let body: unknown = null;
   if (text.length > 0) {

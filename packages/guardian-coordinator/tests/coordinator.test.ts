@@ -6,10 +6,15 @@ import { privateKeyToAccount } from "viem/accounts";
 
 import {
   loadCoordinatorConfig,
+  runGuardianCoordinatorCycle,
   runGuardianCoordinatorOnce,
   type GuardianCoordinatorOptions,
 } from "../src/index.js";
-import { buildGuardianFromEnv as buildCliGuardianFromEnv } from "../src/cli.js";
+import {
+  buildGuardianFromEnv as buildCliGuardianFromEnv,
+  fatalLine,
+  startupLine,
+} from "../src/cli.js";
 import { awsKmsSignTypedData, gcpKmsSignTypedData } from "../src/kms-signers.js";
 
 const REQUEST_ID = "550e8400-e29b-41d4-a716-446655440000";
@@ -86,6 +91,23 @@ const quiet = {
   error() {},
 };
 
+function recordingLogger(): {
+  logger: GuardianCoordinatorOptions["logger"];
+  logs: string[];
+  errors: string[];
+} {
+  const logs: string[] = [];
+  const errors: string[] = [];
+  return {
+    logger: {
+      log: (...args: unknown[]) => void logs.push(args.map(String).join(" ")),
+      error: (...args: unknown[]) => void errors.push(args.map(String).join(" ")),
+    },
+    logs,
+    errors,
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -125,7 +147,12 @@ describe("guardian coordinator", () => {
       throw new Error(`unexpected call ${url}`);
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 1,
+      signed: 1,
+      skipped: 0,
+      failed: 0,
+    });
     expect(signCalls).toHaveLength(1);
     expect(submitBodies).toEqual([{ chainId: 1, signature: SIGNATURE }]);
   });
@@ -210,21 +237,21 @@ describe("guardian coordinator", () => {
       return json({ status: "accepted", quorumReached: true, submissionCount: 1 });
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 4,
+      signed: 4,
+      skipped: 0,
+      failed: 0,
+    });
     expect(seen).toEqual(["set_request", "set_fund", "swap", "request_whitelisting"]);
     expect(submitted).toHaveLength(4);
   });
 
   it("reports request whitelisting rows when the optional signer is unavailable", async () => {
-    const errors: string[] = [];
+    const { logger, errors } = recordingLogger();
     const calls: string[] = [];
     const options = optionsFor({ signRequestWhitelisting: undefined });
-    options.logger = {
-      log() {},
-      error(message) {
-        errors.push(String(message));
-      },
-    };
+    options.logger = logger;
     options.fetcher = async (input) => {
       const url = String(input);
       calls.push(url);
@@ -246,7 +273,12 @@ describe("guardian coordinator", () => {
       throw new Error(`unexpected call ${url}`);
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 1,
+      signed: 0,
+      skipped: 0,
+      failed: 1,
+    });
     expect(calls).toHaveLength(1);
     expect(
       errors.some((message) =>
@@ -256,7 +288,7 @@ describe("guardian coordinator", () => {
   });
 
   it("skips malformed rows without dropping valid rows in the same page", async () => {
-    const errors: string[] = [];
+    const { logger, errors } = recordingLogger();
     const signCalls: string[] = [];
     const submitBodies: unknown[] = [];
     const options = optionsFor({
@@ -265,12 +297,7 @@ describe("guardian coordinator", () => {
         return Result.ok(SIGNING_SUCCESS);
       },
     });
-    options.logger = {
-      log() {},
-      error(message) {
-        errors.push(String(message));
-      },
-    };
+    options.logger = logger;
     options.fetcher = async (input, init) => {
       const url = String(input);
       if (url.startsWith("http://coordinator.test/v1/guardian/signing-requests?")) {
@@ -288,7 +315,12 @@ describe("guardian coordinator", () => {
       throw new Error(`unexpected call ${url}`);
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 2,
+      signed: 1,
+      skipped: 0,
+      failed: 1,
+    });
     expect(errors.some((message) => message.includes("skipping malformed"))).toBe(true);
     expect(signCalls).toHaveLength(1);
     expect(submitBodies).toEqual([{ chainId: 1, signature: SIGNATURE }]);
@@ -304,7 +336,12 @@ describe("guardian coordinator", () => {
       return json({ total: 0, page: 1, pageSize: 100, items: [] });
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 0,
+      signed: 0,
+      skipped: 0,
+      failed: 0,
+    });
     expect(
       urls.map((url) => {
         const params = new URL(url).searchParams;
@@ -328,7 +365,12 @@ describe("guardian coordinator", () => {
       return json({ total: 0, page: 1, pageSize: 100, items: [] });
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 0,
+      signed: 0,
+      skipped: 0,
+      failed: 0,
+    });
     expect(urls).toHaveLength(1);
     const params = new URL(urls[0]!).searchParams;
     expect(params.has("chainId")).toBe(false);
@@ -353,7 +395,12 @@ describe("guardian coordinator", () => {
       });
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 1,
+      signed: 0,
+      skipped: 1,
+      failed: 0,
+    });
     expect(signCalls).toHaveLength(0);
   });
 
@@ -372,7 +419,12 @@ describe("guardian coordinator", () => {
       throw new Error(`unexpected call ${url}`);
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 1,
+      signed: 0,
+      skipped: 0,
+      failed: 1,
+    });
     expect(calls).toHaveLength(1);
   });
 
@@ -399,7 +451,12 @@ describe("guardian coordinator", () => {
       throw new Error(`unexpected call ${url}`);
     };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toBeUndefined();
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 1,
+      signed: 0,
+      skipped: 0,
+      failed: 1,
+    });
     expect(signCalls).toHaveLength(0);
     expect(calls).toHaveLength(1);
   });
@@ -416,7 +473,15 @@ describe("guardian coordinator", () => {
       coordinatorBaseUrl: "https://coordinator.test",
       chainIds: new Set([1, 8453]),
       facilities: new Set([FACILITY]),
+      requestTimeoutMs: 10_000,
     });
+    expect(
+      loadCoordinatorConfig({
+        COORDINATOR_BASE_URL: "https://coordinator.test/",
+        COORDINATOR_API_KEY: "guardian-key",
+        REQUEST_TIMEOUT_MS: "2500",
+      }).requestTimeoutMs,
+    ).toBe(2_500);
   });
 
   it("ignores empty comma-only coordinator filters", () => {
@@ -667,6 +732,74 @@ describe("guardian coordinator", () => {
     expect(() => buildCliGuardianFromEnv({ ...env, GUARDIAN_SIGN_TIMEOUT_MS: "-1" })).toThrow(
       /positive integer/,
     );
+  });
+
+  it("emits a heartbeat line with cycle stats after a successful poll", async () => {
+    const { logger, logs } = recordingLogger();
+    const options = optionsFor();
+    options.logger = logger;
+    options.fetcher = async (input, init) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      if (String(input).startsWith("http://coordinator.test/v1/guardian/signing-requests?")) {
+        return json({ total: 1, page: 1, pageSize: 100, items: [SIGNING_REQUEST] });
+      }
+      return json({ status: "accepted", quorumReached: true, submissionCount: 1 });
+    };
+
+    await runGuardianCoordinatorCycle(options);
+
+    // The exact serialized shape is the contract regex-based monitoring
+    // matches on; changing it is a breaking change to alerting.
+    const line = logs.find((l) => l.includes("guardian.heartbeat"));
+    expect(line).toMatch(
+      /^\{"level":"info","event":"guardian\.heartbeat","ok":true,"fetched":1,"signed":1,"skipped":0,"failed":0,"durationMs":\d+\}$/,
+    );
+  });
+
+  it("emits the heartbeat with ok:false when the poll itself fails", async () => {
+    const { logger, logs, errors } = recordingLogger();
+    const options = optionsFor();
+    options.logger = logger;
+    options.fetcher = async () => {
+      throw new TypeError("fetch failed");
+    };
+
+    await runGuardianCoordinatorCycle(options);
+
+    expect(errors.some((m) => m.includes("guardian coordinator poll failed"))).toBe(true);
+    expect(logs.find((l) => l.includes("guardian.heartbeat"))).toMatch(/"ok":false/);
+  });
+
+  it("pins the startup and fatal lifecycle lines regex-based monitoring depends on", () => {
+    const guardian = buildCliGuardianFromEnv({
+      ...CLI_ENV,
+      GUARDIAN_SIGNER_KEY: `0x${"11".repeat(32)}`,
+      BUILD_ID: "1.2.3",
+    });
+    expect(startupLine(guardian)).toBe(
+      '{"level":"info","event":"guardian.startup","build":"1.2.3","chains":[1]}',
+    );
+    expect(fatalLine(new Error("COORDINATOR_BASE_URL is required"))).toMatch(
+      /^\{"level":"fatal","event":"guardian\.fatal","err":"COORDINATOR_BASE_URL is required","stack":"Error: COORDINATOR_BASE_URL is required/,
+    );
+    expect(fatalLine("boom")).toBe('{"level":"fatal","event":"guardian.fatal","err":"boom"}');
+  });
+
+  it("aborts a hung coordinator request after requestTimeoutMs, still heartbeating", async () => {
+    const { logger, logs, errors } = recordingLogger();
+    const options = optionsFor();
+    options.logger = logger;
+    options.requestTimeoutMs = 20;
+    options.fetcher = (_input, init) =>
+      new Promise<Response>((_, reject) => {
+        const signal = init?.signal;
+        signal?.addEventListener("abort", () => reject(signal.reason));
+      });
+
+    await runGuardianCoordinatorCycle(options);
+
+    expect(errors.some((m) => m.includes("guardian coordinator poll failed"))).toBe(true);
+    expect(logs.find((l) => l.includes("guardian.heartbeat"))).toMatch(/"ok":false/);
   });
 });
 
