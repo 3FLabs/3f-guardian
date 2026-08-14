@@ -41,6 +41,8 @@ Optional env:
 
 - `POLL_INTERVAL_MS` default `5000`
 - `PAGE_SIZE` default `100`
+- `REQUEST_TIMEOUT_MS` default `10000`; per-request timeout for grunt-api calls. A hung
+  request aborts and surfaces as a failed poll instead of freezing the loop.
 - `CHAIN_IDS` comma-separated signing-request filter
 - `FACILITIES` comma-separated signing-request filter (facility, or whitelist book for
   `request_whitelisting`)
@@ -71,6 +73,41 @@ Optional env:
   `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` — or `request_whitelisting` batches, which
   scan per request contract — need longer than the default.
 - `GUARDIAN_SWAP_PRICE_TOLERANCE_BPS` default `1`
+
+## Lifecycle and heartbeat lines
+
+The CLI emits three JSON lines of its own, shaped alike:
+
+```json
+{"level":"info","event":"guardian.startup","build":"1.2.3","chains":[1]}
+{"level":"info","event":"guardian.heartbeat","ok":true,"fetched":0,"signed":0,"skipped":0,"failed":0,"durationMs":12}
+{"level":"fatal","event":"guardian.fatal","err":"COORDINATOR_BASE_URL is required"}
+```
+
+- `guardian.startup` — stdout, once, after config and signer construction succeed.
+  It means the config parsed and the signer was constructed — not that the signer or
+  RPCs were exercised. The first heartbeat is the first proof of live work.
+- `guardian.heartbeat` — stdout, one per poll cycle, including cycles whose poll
+  failed (`ok: false`); its absence means the loop is dead or wedged. The gap between
+  heartbeats is poll duration + `POLL_INTERVAL_MS`, not just the interval: a busy
+  cycle (many requests × `GUARDIAN_SIGN_TIMEOUT_MS`, plus event scans) legitimately
+  stretches it. Size any absence alert to the worst-case cycle duration, not to the
+  poll interval, or a burst of signing work will page you for nothing.
+- `guardian.fatal` — stderr, right before the process exits with code 1, whether the
+  failure happened at boot (bad config) or later. Carries a `stack` field, appended
+  after `err`, when the thrown value has one.
+
+The serialized shapes are a monitoring contract pinned by tests in
+`tests/coordinator.test.ts`; changing them breaks downstream alerting.
+
+`log-contract.json` at the package root is the machine-readable version of this
+contract: one regex per guaranteed line (the three lines above plus the
+`submitted guardian signature for` / `guardian coordinator poll failed:` /
+`failed guardian signing request` / `skipping malformed guardian signing request:`
+prefixes). Monitoring should build its rules from that file.
+`tests/log-contract.test.ts` verifies it in both directions — every pattern is
+emitted by a real code path, and every emitted line matches a pattern — so
+adding, removing, or rewording a log line without updating the contract fails CI.
 
 For `remote_http`, the coordinator sends:
 

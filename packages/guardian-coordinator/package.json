@@ -21,7 +21,8 @@
   "files": [
     "dist",
     "src",
-    "README.md"
+    "README.md",
+    "log-contract.json"
   ],
   "publishConfig": {
     "access": "public",
