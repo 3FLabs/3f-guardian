@@ -1,0 +1,12 @@
+{
+  "description": "Log lines the guardian-coordinator guarantees on stdout/stderr. Regex-based monitoring must build its rules from these patterns. tests/log-contract.test.ts verifies both directions: every pattern is emitted by a real code path, and every emitted line matches a pattern. Changing a pattern is a breaking change to downstream alerting.",
+  "patterns": {
+    "startup": "^\\{\"level\":\"info\",\"event\":\"guardian\\.startup\",\"build\":",
+    "heartbeat": "^\\{\"level\":\"info\",\"event\":\"guardian\\.heartbeat\",\"ok\":(true|false),\"fetched\":\\d+,\"signed\":\\d+,\"skipped\":\\d+,\"failed\":\\d+,\"durationMs\":\\d+\\}$",
+    "fatal": "^\\{\"level\":\"fatal\",\"event\":\"guardian\\.fatal\",\"err\":",
+    "submitted": "^submitted guardian signature for ",
+    "poll_failed": "^guardian coordinator poll failed: ",
+    "signing_failed": "^failed guardian signing request ",
+    "malformed_request": "^skipping malformed guardian signing request: "
+  }
+}
