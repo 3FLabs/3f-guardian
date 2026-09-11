@@ -115,6 +115,13 @@ const SOURCES: readonly Source[] = [
     sourcePath: "OwnableMockFund.sol",
     repo: "local",
   },
+  // Local — Retargetter stand-in exposing only `operation()`
+  {
+    name: "MockRetargetter",
+    artifactPath: "out/MockRetargetter.sol/MockRetargetter.json",
+    sourcePath: "MockRetargetter.sol",
+    repo: "local",
+  },
   // Local — Multicall3 vendored from mds1/multicall3 (MIT). Anvil doesn't
   // deploy multicall3 by default; we need it for `client.multicall(...)`.
   {

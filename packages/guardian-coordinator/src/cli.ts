@@ -48,6 +48,7 @@ const DEFAULT_MAX_DEADLINE_SECONDS_AHEAD = 600;
 const DEFAULT_EVENT_SCAN_BLOCK_RANGE = 10_000n;
 const DEFAULT_EVENT_SCAN_MAX_LOOKBACK_BLOCKS = 1_000_000n;
 const DEFAULT_MAX_NONCE_ABOVE_FLOOR = 100n;
+const DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS = 80 * 24 * 60 * 60;
 const DEFAULT_REMOTE_SIGNER_TIMEOUT_MS = 6_000;
 const DEFAULT_SWAP_PRICE_TOLERANCE_BPS = 1;
 const MULTICALL3_ADDRESS = "0xca11bde05977b3631167028862be2a173976ca11";
@@ -73,6 +74,16 @@ export function buildGuardianFromEnv(
           "GUARDIAN_TRUSTED_REQUEST_CONTRACTS",
         )
       : undefined,
+    // Retargetters whose own Requests skip factory / owner / role
+    // verification in favour of the retargetter's live operation state.
+    // Unset = every request contract takes the classic path.
+    acceptedRetargetters: env.GUARDIAN_ACCEPTED_RETARGETTERS?.trim()
+      ? parseAddressMap(env.GUARDIAN_ACCEPTED_RETARGETTERS, "GUARDIAN_ACCEPTED_RETARGETTERS")
+      : undefined,
+    minRetargetterRepaymentBufferSeconds: nonNegativeInt(
+      env.GUARDIAN_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS,
+      DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS,
+    ),
     acceptedRequestFactories: parseAddressMap(
       required(env, "GUARDIAN_REQUEST_FACTORIES"),
       "GUARDIAN_REQUEST_FACTORIES",

@@ -53,6 +53,15 @@ export type AddressBook = {
   readonly whitelistBookImpl: Address;
   readonly erc1967Factory: Address;
   readonly mockFund: Address;
+  /** `MockRetargetter` — owner, puller and consumer of `retargetterRequest`. */
+  readonly mockRetargetter: Address;
+  /**
+   * A real Request minted by `requestFactory` with `mockRetargetter` as
+   * owner / puller / consumer and a 90-day repayment deadline, attached
+   * to `mockRetargetter.operation()` — the shape `startRetargetting`
+   * produces on chain.
+   */
+  readonly retargetterRequest: Address;
   readonly tokens: {
     readonly collateral: Address;
     readonly debt: Address;
@@ -316,6 +325,50 @@ export async function deployGuardianStack(
     "address,address,address",
   );
 
+  /* 8b. MockRetargetter + its own Request --------------------------- */
+  const mockRetargetter = await deployArtifact(client, "MockRetargetter", [], "");
+  const retargetterBlock = await client.publicClient.getBlock();
+  const retargetterDeadline = BigInt(retargetterBlock.timestamp) + 90n * 24n * 3600n;
+  const retargetterReqHash = await client.walletClient.sendTransaction({
+    account: owner.account,
+    chain: client.walletClient.chain,
+    to: requestFactory,
+    data: encodeFunctionData({
+      abi: artifacts.RequestFactory.abi,
+      functionName: "createRequest",
+      args: [
+        mockRetargetter,
+        mockRetargetter,
+        mockRetargetter,
+        debt,
+        "Retargetter Test",
+        "RTR",
+        retargetterDeadline,
+        0,
+      ],
+    }),
+  });
+  const retargetterReqReceipt = await client.publicClient.waitForTransactionReceipt({
+    hash: retargetterReqHash,
+  });
+  const retargetterReqCreated = parseEventLogs({
+    abi: artifacts.RequestFactory.abi,
+    logs: retargetterReqReceipt.logs,
+    eventName: "RequestCreated",
+  });
+  if (retargetterReqCreated.length === 0) throw new Error("RequestCreated event missing");
+  const retargetterRequest = (retargetterReqCreated[0] as unknown as { args: { request: Address } })
+    .args.request;
+  await sendOwnerTx(
+    client,
+    mockRetargetter,
+    encodeFunctionData({
+      abi: artifacts.MockRetargetter.abi,
+      functionName: "setOperation",
+      args: [retargetterRequest, retargetterDeadline],
+    }),
+  );
+
   /* 9. Create an Intent on the Facility ----------------------------- */
   // Several §A checks (notably §A.2 fund-binding) read
   // `facility.getIntent(id)` and revert if no intent exists. We
@@ -352,6 +405,8 @@ export async function deployGuardianStack(
     whitelistBookImpl,
     erc1967Factory,
     mockFund,
+    mockRetargetter,
+    retargetterRequest,
     tokens: { collateral, debt },
     accounts: {
       deployer: testAccounts.deployer,

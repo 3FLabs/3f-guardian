@@ -13,6 +13,7 @@ import type { StandardSchemaV1 } from "../cache/standard-schema.js";
 import type { AsyncCache } from "../cache/types.js";
 import { requestAbi, ROLE_CONSUMER, ROLE_PULLER } from "../abi/request.js";
 import { morphoFlashLoanRequestFactoryAbi, requestFactoryAbi } from "../abi/request-factory.js";
+import { retargetterAbi } from "../abi/retargetter.js";
 import {
   checkDeadline,
   checkMembership,
@@ -60,6 +61,38 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
  *    key material, and prefer the accepted-set checks everywhere else.
  *    Omitted = every request contract is fully validated.
  *
+ *  - `acceptedRetargetters` — Retargetter contracts
+ *    (`grunt/src/manager/rebalancer/Retargetter.sol`) the operator has
+ *    vetted. A Retargetter deploys its own Request in
+ *    `startRetargetting` — through its bound factory, with itself as
+ *    owner, puller and consumer — so when `owner()` of the request
+ *    contract is on this set §A.1 takes the RETARGETTER PATH instead of
+ *    the classic one: the factory, owner and puller / consumer role
+ *    checks are emitted as `skipped:true` (no role-events scan, no
+ *    `getBlockNumber`, no `getLogs`) and two checks against the
+ *    retargetter's live `operation()` take their place — the request
+ *    contract MUST be the retargetter's currently attached operation
+ *    request, and that operation's `repaymentDeadline` MUST be at least
+ *    `minRetargetterRepaymentBufferSeconds` ahead of now. The deadline
+ *    check still applies. Nothing is cached on this path: attachment is
+ *    live operation state that flips at operation boundaries, and the
+ *    path costs no scan, so there is nothing to amortise. This delegates
+ *    provenance and role configuration to the retargetter's code, so
+ *    keep the set to retargetters whose deployment is under the same
+ *    control as the accepted factories. Omitted = every request contract
+ *    takes the classic path.
+ *
+ *  - `minRetargetterRepaymentBufferSeconds` — how far ahead of now the
+ *    retargetter operation's `repaymentDeadline` must sit for the
+ *    retargetter path to pass. Default
+ *    {@link DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS} (80 days),
+ *    mirroring the contract's `MIN_DEADLINE_BUFFER`: the retargetter
+ *    refuses to start its loan clock with less than that remaining, so a
+ *    signature issued below it could never be consumed on chain. The
+ *    Request is deployed with a 90-day deadline, leaving a 10-day window
+ *    in which bindings can be signed. Only consulted when
+ *    `acceptedRetargetters` is set; must be a non-negative integer.
+ *
  *  - `acceptedPullers` / `acceptedConsumers` — every address holding
  *    `_ROLE_PULLER` (resp. `_ROLE_CONSUMER`) on the request contract,
  *    derived from a `RolesUpdated` event replay, MUST be on these
@@ -99,6 +132,8 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
 export type IntentRequestBindingPolicy = {
   readonly maxDeadlineSecondsAhead: number;
   readonly trustedRequestContracts?: ReadonlyMap<number, ReadonlySet<string>>;
+  readonly acceptedRetargetters?: ReadonlyMap<number, ReadonlySet<string>>;
+  readonly minRetargetterRepaymentBufferSeconds?: number;
   readonly acceptedRequestFactories: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedFlashLoanRequestFactories?: ReadonlyMap<number, ReadonlySet<string>>;
   readonly acceptedFlashLoanRequestExecutors?: ReadonlyMap<number, ReadonlySet<string>>;
@@ -110,6 +145,13 @@ export type IntentRequestBindingPolicy = {
   readonly eventScanDeadlineMs?: number;
   readonly onLookbackExhausted?: "skip" | "fail";
 };
+
+/**
+ * Default `minRetargetterRepaymentBufferSeconds`: 80 days, the
+ * Retargetter's on-chain `MIN_DEADLINE_BUFFER`
+ * (`grunt/src/libs/manager/rebalancer/LibRetargetterConstants.sol`).
+ */
+export const DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS = 80 * 24 * 60 * 60;
 
 /**
  * Cached representation of the §A.1 on-chain reads. Stored verbatim by
@@ -139,6 +181,9 @@ export type IntentRequestBindingPolicy = {
  *    fully-replayed role-holder bitfield map. Membership decisions are
  *    made by `evaluateA1` against the live policy, so this entry can
  *    safely outlive a policy change.
+ *
+ * The retargetter path (see `acceptedRetargetters`) never produces an
+ * entry: its data is live operation state, read fresh on every call.
  *
  * `holders` is a plain `Map<Address, bigint>` for parity with
  * `scanRoleHolders`. Cross-process cache adapters (Redis, KV) MUST
@@ -235,6 +280,14 @@ export type A1Deps = {
  * as `skipped:true`, no RPC is issued, and only the deadline check runs.
  * See {@link IntentRequestBindingPolicy} for what that delegation costs.
  *
+ * A request contract whose stage-1 `owner()` is on the policy's optional
+ * `acceptedRetargetters` set takes the retargetter path instead of
+ * stage 2: checks 1–4 are emitted as `skipped:true` and one further
+ * read — the retargetter's `operation()` — backs two checks in their
+ * place (the contract is the attached operation request; the operation's
+ * repayment deadline is at least `minRetargetterRepaymentBufferSeconds`
+ * ahead). The result is never cached.
+ *
  * Stage 1 — single multicall (`allowFailure: true`):
  *   - `request.owner()`
  *   - the configured provenance check for each accepted factory
@@ -275,6 +328,7 @@ export type A1Deps = {
 export function buildIntentRequestBindingChecks(
   deps: A1Deps,
 ): CheckRunner<IntentRequestBindingBody, false> {
+  assertRetargetterPolicy("buildIntentRequestBindingChecks", deps.policy);
   return async (
     ctx: SigningContext,
     body: IntentRequestBindingBody,
@@ -340,11 +394,28 @@ export async function runA1(
         "A.1: cache.get failed; treating as miss",
       );
     }
+    // A classic-path entry written before its owner was listed as a
+    // retargetter must not keep the contract on the classic path until
+    // the TTL runs out: the retargetter path reads live state, so treat
+    // the entry as a miss and let the fresh fetch branch.
+    if (
+      onChain !== undefined &&
+      onChain.kind !== "noFactory" &&
+      isAcceptedRetargetter(onChain.owner, chainId, policy)
+    ) {
+      onChain = undefined;
+    }
   }
 
   if (onChain === undefined) {
     const fetched = await fetchA1OnChain(ctx, chainId, requestContract, policy);
     if (fetched.isErr()) return Result.err(fetched.error);
+    if (fetched.value.kind === "retargetter") {
+      // Live operation state — evaluated fresh, never written back.
+      return rollupA1(
+        evaluateRetargetter(fetched.value, requestContract, nowUnix, policy, deadlineCheck),
+      );
+    }
     onChain = fetched.value;
 
     if (cache !== undefined) {
@@ -363,17 +434,34 @@ export async function runA1(
 }
 
 /**
+ * Live state read on the retargetter path. Deliberately NOT part of
+ * {@link A1OnChainData}: `attachedRequest` flips at operation boundaries
+ * (`startRetargetting` sets it, resolution clears it), so it is never
+ * cached and never replayed.
+ */
+type RetargetterOnChainData = {
+  readonly kind: "retargetter";
+  /** The request contract's `owner()` — the retargetter itself. */
+  readonly retargetter: Address;
+  /** `operation().request`; `address(0)` when the retargetter is idle. */
+  readonly attachedRequest: Address;
+  /** `operation().repaymentDeadline`, Unix seconds. */
+  readonly repaymentDeadline: bigint;
+};
+
+/**
  * Performs the on-chain reads needed for §A.1. Returns the raw data
  * (factory match, owner, role-holder map) that `evaluateA1` consumes
  * — split out so the cache can replay results without re-issuing any
- * RPCs.
+ * RPCs — or, when the stage-1 owner is an accepted retargetter, the
+ * uncacheable {@link RetargetterOnChainData} for `evaluateRetargetter`.
  */
 async function fetchA1OnChain(
   ctx: SigningContext,
   chainId: number,
   requestContract: Address,
   policy: IntentRequestBindingPolicy,
-): Promise<Result<A1OnChainData, UpstreamUnavailableError>> {
+): Promise<Result<A1OnChainData | RetargetterOnChainData, UpstreamUnavailableError>> {
   const acceptedFactories = policy.acceptedRequestFactories.get(chainId) ?? new Set<string>();
   const acceptedFlashLoanFactories =
     policy.acceptedFlashLoanRequestFactories?.get(chainId) ?? new Set<string>();
@@ -463,6 +551,21 @@ async function fetchA1OnChain(
     );
   }
   const owner = ownerSlot.result;
+
+  // ── Retargetter path ─────────────────────────────────────────────
+  // The owner is a vetted Retargetter: its own code deployed this
+  // request (through its bound factory, with itself as owner, puller
+  // and consumer), so provenance and role holders are implied by the
+  // attachment we verify next. The factory slots above are ignored
+  // rather than avoided — they share the multicall, and the owner is
+  // not known before it returns.
+  if (isAcceptedRetargetter(owner, chainId, policy)) {
+    ctx.logger.info(
+      { requestContract, retargetter: owner, chainId },
+      "A.1: request contract is owned by an accepted retargetter; taking the retargetter path",
+    );
+    return fetchRetargetterOperation(ctx, owner, requestContract);
+  }
 
   const factoryHits = new Map<string, Address>();
   const failedFactories: Address[] = [];
@@ -720,14 +823,148 @@ function isTrustedRequestContract(
   chainId: number,
   policy: IntentRequestBindingPolicy,
 ): boolean {
-  const trusted = policy.trustedRequestContracts?.get(chainId);
-  if (trusted === undefined) return false;
-  const target = requestContract.toLowerCase();
-  for (const candidate of trusted) {
+  return isOnChainSet(policy.trustedRequestContracts, chainId, requestContract);
+}
+
+/**
+ * True iff `owner` is on the policy's `acceptedRetargetters` set for
+ * `chainId` (case-insensitive). An absent set lists nothing, so every
+ * request contract stays on the classic path unless an operator opts in.
+ */
+function isAcceptedRetargetter(
+  owner: Address,
+  chainId: number,
+  policy: IntentRequestBindingPolicy,
+): boolean {
+  return isOnChainSet(policy.acceptedRetargetters, chainId, owner);
+}
+
+/** Case-insensitive membership in an optional per-chain address set. */
+function isOnChainSet(
+  sets: ReadonlyMap<number, ReadonlySet<string>> | undefined,
+  chainId: number,
+  address: Address,
+): boolean {
+  const set = sets?.get(chainId);
+  if (set === undefined) return false;
+  const target = address.toLowerCase();
+  for (const candidate of set) {
     if (candidate.toLowerCase() === target) return true;
   }
   return false;
 }
+
+/**
+ * Construction-time guard shared by the §A.1 and §A.4 builders: a
+ * fractional or negative buffer would make the retargetter deadline
+ * check meaningless on every request, so reject it up front.
+ */
+export function assertRetargetterPolicy(builder: string, policy: IntentRequestBindingPolicy): void {
+  const buffer = policy.minRetargetterRepaymentBufferSeconds;
+  if (buffer !== undefined && (!Number.isInteger(buffer) || buffer < 0)) {
+    throw new TypeError(
+      `${builder}: minRetargetterRepaymentBufferSeconds must be a non-negative integer, ` +
+        `got ${buffer}`,
+    );
+  }
+}
+
+/**
+ * Reads the accepted retargetter's `operation()`. The retargetter
+ * address comes from OPERATOR configuration (it is the request's
+ * `owner()`, matched against `acceptedRetargetters`), so a
+ * deterministic failure — revert / no return data because the listed
+ * address is an EOA or not a Retargetter — is a configuration error,
+ * never a client-blamed 422: it is logged at error level and fails 503
+ * like a misconfigured factory. Transport failures keep the 503 path.
+ */
+async function fetchRetargetterOperation(
+  ctx: SigningContext,
+  retargetter: Address,
+  requestContract: Address,
+): Promise<Result<RetargetterOnChainData, UpstreamUnavailableError>> {
+  try {
+    const [operation] = await ctx.client.multicall({
+      contracts: [
+        { address: retargetter, abi: retargetterAbi, functionName: "operation" },
+      ] as const,
+      allowFailure: false,
+    });
+    const [, attachedRequest, , , repaymentDeadline] = operation;
+    return Result.ok({
+      kind: "retargetter",
+      retargetter,
+      attachedRequest,
+      repaymentDeadline: BigInt(repaymentDeadline),
+    });
+  } catch (e) {
+    ctx.logger.error(
+      { err: sanitizeErr(e), retargetter, requestContract },
+      isDeterministicContractCallFailure(e, ["operation"])
+        ? "A.1: accepted retargetter did not answer operation(); check its configuration"
+        : "A.1: retargetter operation() read failed upstream",
+    );
+    return Result.err(
+      new UpstreamUnavailableError({
+        message: "retargetter operation read failed upstream",
+        status: 503,
+      }),
+    );
+  }
+}
+
+/**
+ * §A.1 entries for the retargetter path. The classic entries it stands
+ * in for are emitted as `skipped:true` so the §6.4.1 array still says
+ * which verifications did not happen, followed by the two checks that
+ * replace them. Pure: same input → same output.
+ */
+function evaluateRetargetter(
+  data: RetargetterOnChainData,
+  requestContract: Address,
+  nowUnixSeconds: number,
+  policy: IntentRequestBindingPolicy,
+  deadlineCheck: CheckEntry,
+): readonly CheckEntry[] {
+  const attachedDescription = "request contract is the retargetter's attached operation request";
+  const attachedCheck =
+    data.attachedRequest.toLowerCase() === requestContract.toLowerCase()
+      ? passed(attachedDescription)
+      : failed(
+          attachedDescription,
+          data.attachedRequest === ZERO_ADDRESS
+            ? `retargetter ${data.retargetter} has no active operation`
+            : `retargetter ${data.retargetter} is attached to ${data.attachedRequest}, not this contract`,
+        );
+
+  const buffer = BigInt(
+    policy.minRetargetterRepaymentBufferSeconds ?? DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS,
+  );
+  const floor = BigInt(nowUnixSeconds) + buffer;
+  const bufferDescription =
+    "retargetter repayment deadline is at least MIN_RETARGETTER_REPAYMENT_BUFFER ahead of now";
+  const bufferCheck =
+    data.repaymentDeadline >= floor
+      ? passed(bufferDescription)
+      : failed(
+          bufferDescription,
+          `repayment deadline ${data.repaymentDeadline} is below floor ${floor} ` +
+            `(now=${nowUnixSeconds}, min-buffer=${buffer})`,
+        );
+
+  return [
+    passed("owner of request contract is on the accepted-retargetters list"),
+    skipped("request contract was deployed by an accepted factory"),
+    skipped("owner of request contract is on the accepted-owners list"),
+    skipped("puller role on request contract is held only by accepted parties"),
+    skipped("consumer role on request contract is held only by accepted parties"),
+    attachedCheck,
+    bufferCheck,
+    deadlineCheck,
+  ];
+}
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 /**
  * §A.1 entries for a trusted request contract: the trust entry passes and

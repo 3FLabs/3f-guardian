@@ -68,6 +68,19 @@ Optional env:
   whatever its owner and role holders turn out to be, including grants made after it was
   listed, so keep it to contracts whose configuration is under the same control as the
   Guardian's own key material. Every bypass is logged at warn level.
+- `GUARDIAN_ACCEPTED_RETARGETTERS` optional `chainId=addr,addr;chainId=addr`. Request
+  contracts whose `owner()` is a listed Retargetter take the §A.1 retargetter path for both
+  `set_request` and `request_whitelisting`: factory-provenance, owner, and puller / consumer
+  role verification are skipped (no role-events scan) and the retargetter's live
+  `operation()` is checked instead — the request contract must be its attached operation
+  request, with a repayment deadline at least
+  `GUARDIAN_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS` ahead. Unset (the default) keeps
+  every request contract on the classic path. The path trusts the retargetter's code for
+  provenance and role configuration, so list only retargetters deployed under the same
+  control as the accepted factories.
+- `GUARDIAN_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS` default `6912000` (80 days, the
+  Retargetter's on-chain `MIN_DEADLINE_BUFFER`); minimum runway the retargetter operation's
+  repayment deadline must have for the retargetter path to pass.
 - `GUARDIAN_SIGN_TIMEOUT_MS` default `6000`; budget for one whole validate-and-sign
   call, including the on-chain reads. Raise it when role-events scans over a wide
   `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` — or `request_whitelisting` batches, which
