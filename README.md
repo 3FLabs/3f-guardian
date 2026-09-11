@@ -45,7 +45,7 @@ bun run build           # tsc emit .js + .d.ts per package
 
 The root `build` / `test` / `test:integration` / `typecheck` scripts invoke each package
 explicitly via `bun run --cwd packages/<pkg> …`, so a missing package script fails loudly.
-Bun itself is pinned through the root `packageManager` field (`bun@1.3.14`); CI reads it
+Bun itself is pinned through the root `packageManager` field (`bun@1.4.2`); CI reads it
 via setup-bun's `bun-version-file`, so bumping Bun is a single-line change.
 
 Per-package work:
