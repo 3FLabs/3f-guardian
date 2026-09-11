@@ -5,7 +5,7 @@
 ## What it does
 
 - Boots a [prool](https://github.com/wevm/prool)-managed anvil pool, bound to `127.0.0.1` only. Each vitest worker gets its own anvil instance, multiplexed by the worker id (`process.env.VITEST_POOL_ID`) under the path `http://127.0.0.1:<port>/<workerId>`. `startAnvilPool` accepts optional `port` and `limit` options (`limit` defaults to 64 and caps how many anvil instances the pool will spawn); a fixed-port `EADDRINUSE` surfaces as a catchable promise rejection.
-- Deploys the Guardian-relevant slice of the 3F protocol (Facility, IntentDescriptor, TransferGuard, PositionManagerFactory + a real PositionManager, RequestFactory + a real Request, RequestWhitelist via fresh ERC-1967 proxy, an `OwnableMockFund` standing in for §A.2's fund). Mirrors `grunt/test/facility/FacilityBase.t.sol` minus the Morpho borrow market.
+- Deploys the Guardian-relevant slice of the 3F protocol (Facility, IntentDescriptor, TransferGuard, PositionManagerFactory + a real PositionManager, RequestFactory + a real Request, RequestWhitelist via fresh ERC-1967 proxy, an `OwnableMockFund` standing in for §A.2's fund, a `MockRetargetter` owning a second real Request for the §A.1 retargetter path). Mirrors `grunt/test/facility/FacilityBase.t.sol` minus the Morpho borrow market.
 - Hands tests a typed `AddressBook` plus pre-built viem `publicClient` / `walletClient` / `testClient`.
 
 ## Foundry artifacts
@@ -27,11 +27,13 @@ bun run fixtures:check
 
 `fixtures:check` always validates the bundled artifacts' integrity (file exists, parses, carries abi/bytecode/deployedBytecode/sourceCommitHash, and `INDEX.json` matches the stamps byte-for-byte) and only performs the sibling-drift comparison for repos whose forge output is actually present — it prints a `[fixtures] NOTICE: skipped sibling-drift verification` line for each absent repo and exits 0 on a fresh clone or CI runner without sibling checkouts.
 
-`OwnableMockFund` and the vendored `Multicall3` are the only contracts whose source lives in this repo (`contracts/`); `fixtures:extract` always runs `forge build` on that directory (foundry's incremental build is near-instant when nothing changed), so editing a local `.sol` cannot silently re-stamp stale bytecode — `forge` must be on `PATH`. For these `local` artifacts the recorded `sourceCommitHash` is the monorepo's own HEAD and is provenance metadata only: `fixtures:check` compares their abi/bytecode/deployedBytecode but does not gate on the hash.
+`OwnableMockFund`, `MockRetargetter` and the vendored `Multicall3` are the only contracts whose source lives in this repo (`contracts/`); `fixtures:extract` always runs `forge build` on that directory (foundry's incremental build is near-instant when nothing changed), so editing a local `.sol` cannot silently re-stamp stale bytecode — `forge` must be on `PATH`. For these `local` artifacts the recorded `sourceCommitHash` is the monorepo's own HEAD and is provenance metadata only: `fixtures:check` compares their abi/bytecode/deployedBytecode but does not gate on the hash.
 
 ## Why MockFund isn't reused
 
 The grunt `MockFund` (`test/mock/facility/MockFund.sol`) doesn't expose `Ownable.owner()`, which the §A.2 `intent-fund-binding` check reads. Spinning up a real `ParetoFund` would require a `WrappedAsset` proxy + `MockIdleCDOEpochVariant` + `MockIdleCreditVault` — too much yak-shaving for a domain-binding test. `OwnableMockFund` is the smallest contract that covers the surface the Guardian reads.
+
+Likewise a real `Retargetter` needs a position manager, quoter and flash-loan module behind it; `MockRetargetter` exposes only `operation()` — with the production return tuple, so the bundled `retargetterAbi` decodes it exactly as it would the real contract — and an unauthenticated `setOperation` for attaching / detaching a Request.
 
 ## Licensing
 

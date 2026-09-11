@@ -913,6 +913,8 @@ async function fetchRetargetterOperation(
   }
 }
 
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
 /**
  * §A.1 entries for the retargetter path. The classic entries it stands
  * in for are emitted as `skipped:true` so the §6.4.1 array still says
@@ -963,8 +965,6 @@ function evaluateRetargetter(
     deadlineCheck,
   ];
 }
-
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 /**
  * §A.1 entries for a trusted request contract: the trust entry passes and
