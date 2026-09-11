@@ -30,17 +30,17 @@
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
-    "@elysiajs/openapi": "^1.4.15",
-    "@noble/hashes": "^2.2.0",
-    "better-result": "^2.9.2",
-    "elysia": "^1.4.28",
-    "viem": "^2.52.2",
-    "zod": "^4.0.0"
+    "@elysiajs/openapi": "^1.4.16",
+    "@noble/hashes": "^2.4.0",
+    "better-result": "^3.0.1",
+    "elysia": "^1.4.30",
+    "viem": "^2.56.3",
+    "zod": "^4.6.2"
   },
   "devDependencies": {
     "@3flabs/guardian-test-fixtures": "workspace:*",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.8"
+    "vitest": "^5.0.0"
   },
   "repository": {
     "type": "git",

@@ -38,23 +38,23 @@ export function isGuardianErrorTag(value: unknown): value is GuardianError {
  */
 export class UnauthenticatedError extends TaggedError("Unauthenticated")<{
   message: string;
-}>() {}
+}> {}
 
 /** Token lacks scope. Maps to 403 forbidden. */
 export class ForbiddenError extends TaggedError("Forbidden")<{
   message: string;
-}>() {}
+}> {}
 
 /** Malformed body or headers, or sentinel values rejected up-front. */
 export class BadRequestError extends TaggedError("BadRequest")<{
   message: string;
   details?: Record<string, unknown>;
-}>() {}
+}> {}
 
 /** §6.1 — Content-Type other than application/json on a body-bearing request. */
 export class UnsupportedMediaTypeError extends TaggedError("UnsupportedMediaType")<{
   message: string;
-}>() {}
+}> {}
 
 /**
  * Request body exceeds the shell's `maxBodyBytes` cap. Maps to 413; the
@@ -63,19 +63,19 @@ export class UnsupportedMediaTypeError extends TaggedError("UnsupportedMediaType
  */
 export class PayloadTooLargeError extends TaggedError("PayloadTooLarge")<{
   message: string;
-}>() {}
+}> {}
 
 /** chainId not in supportedChains. Maps to 400 unsupported_chain. */
 export class UnsupportedChainError extends TaggedError("UnsupportedChain")<{
   message: string;
   chainId: number;
-}>() {}
+}> {}
 
 /** Unknown route or unresolvable on-chain reference. Maps to 404. */
 export class NotFoundError extends TaggedError("NotFound")<{
   message: string;
   details?: Record<string, unknown>;
-}>() {}
+}> {}
 
 /**
  * On-chain state incompatible in a transient way. Maps to 409.
@@ -85,24 +85,24 @@ export class NotFoundError extends TaggedError("NotFound")<{
 export class StateConflictError extends TaggedError("StateConflict")<{
   message: string;
   checks: CheckEntry[];
-}>() {}
+}> {}
 
 /** Policy check failed. Maps to 422 validation_failed. */
 export class ValidationFailedError extends TaggedError("ValidationFailed")<{
   message: string;
   checks: CheckEntry[];
-}>() {}
+}> {}
 
 /** Maps to 429 rate_limited. */
 export class RateLimitedError extends TaggedError("RateLimited")<{
   message: string;
   retryAfterSeconds: number;
-}>() {}
+}> {}
 
 /** Unexpected Guardian-side failure. Maps to 500. */
 export class InternalError extends TaggedError("InternalError")<{
   message: string;
-}>() {}
+}> {}
 
 /**
  * RPC or other dependency unavailable. Maps to 502 / 503. When
@@ -113,7 +113,7 @@ export class UpstreamUnavailableError extends TaggedError("UpstreamUnavailable")
   message: string;
   status: 502 | 503;
   retryAfterSeconds?: number;
-}>() {}
+}> {}
 
 /**
  * Discriminated union of every error a route can produce.

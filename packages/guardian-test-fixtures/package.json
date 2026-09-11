@@ -15,12 +15,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "prool": "^0.2.4",
-    "viem": "^2.52.2"
+    "prool": "^0.2.15",
+    "viem": "^2.56.3"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "vitest": "^4.1.8"
+    "vitest": "^5.0.0"
   },
   "license": "MIT"
 }
