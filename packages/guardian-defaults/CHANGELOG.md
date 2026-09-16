@@ -1,5 +1,19 @@
 # @3flabs/guardian-defaults
 
+## 0.4.0
+
+### Minor Changes
+
+- dabc2dd: Add an opt-in retargetter path to the §A.1 checks. When the request contract's `owner()` is on the new `acceptedRetargetters` policy set (`GUARDIAN_ACCEPTED_RETARGETTERS`), the factory, owner and puller / consumer role checks are skipped in favour of the retargetter's live `operation()`: the contract must be the retargetter's attached operation request and the operation's repayment deadline must be at least `minRetargetterRepaymentBufferSeconds` ahead (`GUARDIAN_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS`, default 80 days — the contract's `MIN_DEADLINE_BUFFER`). §A.4 whitelist ops inherit it per request contract. Every other request contract keeps the classic path. Ships `retargetterAbi` and a `MockRetargetter` test fixture.
+
+### Patch Changes
+
+- 43db013: Release under the Changesets v3 pipeline. No runtime changes — this bump exercises the new split release workflow (`select-mode` → `version` / `pack` → `publish`) end to end.
+- dabc2dd: Update runtime dependencies. `better-result` moves to 3.x: the exported error classes (`UnauthenticatedError`, `ValidationFailedError`, …) still extend its `TaggedError`, so hosts that call `isTaggedError` / `matchError` on Guardian errors with their own copy of `better-result` should be on 3.x too. Also picks up viem 2.56, zod 4.6, elysia 1.4.30, `@noble/hashes` 2.4, `@aws-sdk/client-kms` 3.1130, and `@google-cloud/kms` 6.1 (Node ≥ 22 only; the coordinator runs on Bun).
+- Updated dependencies [43db013]
+- Updated dependencies [dabc2dd]
+  - @3flabs/guardian@0.6.0
+
 ## 0.3.2
 
 ### Patch Changes

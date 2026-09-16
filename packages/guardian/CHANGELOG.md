@@ -1,5 +1,15 @@
 # @3flabs/guardian
 
+## 0.6.0
+
+### Minor Changes
+
+- dabc2dd: Update runtime dependencies. `better-result` moves to 3.x: the exported error classes (`UnauthenticatedError`, `ValidationFailedError`, …) still extend its `TaggedError`, so hosts that call `isTaggedError` / `matchError` on Guardian errors with their own copy of `better-result` should be on 3.x too. Also picks up viem 2.56, zod 4.6, elysia 1.4.30, `@noble/hashes` 2.4, `@aws-sdk/client-kms` 3.1130, and `@google-cloud/kms` 6.1 (Node ≥ 22 only; the coordinator runs on Bun).
+
+### Patch Changes
+
+- 43db013: Release under the Changesets v3 pipeline. No runtime changes — this bump exercises the new split release workflow (`select-mode` → `version` / `pack` → `publish`) end to end.
+
 ## 0.5.0
 
 ### Minor Changes
