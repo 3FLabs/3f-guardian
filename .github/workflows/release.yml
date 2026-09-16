@@ -16,56 +16,186 @@ concurrency:
 
 jobs:
   # Run the full CI suite (build + lint + format + typecheck + test) before doing
-  # anything releasey. `release` blocks on this via `needs: verify`, so a red test
-  # never reaches changesets/action — neither the version PR nor the publish step.
+  # anything releasey. Every downstream job blocks on this, so a red test never
+  # reaches changesets — neither the version PR nor the publish.
   # Verification only needs to read the repo.
   verify:
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
 
-  release:
+  # Decide what this push should do, before any write-scoped token exists:
+  #   `version` — pending changesets, so open/update the Version Packages PR
+  #   `publish` — no changesets and unpublished versions, so release them
+  #   `none`    — nothing to do
+  # Splitting this out is what lets `version` and `publish` be separate jobs
+  # with disjoint permissions instead of one job holding every grant.
+  select-mode:
     needs: verify
-    name: changesets version + publish
+    name: select changesets mode
     runs-on: ubuntu-latest
-    # Build + version/publish completes in a few minutes; don't let a
-    # hung npm/API call hold the write-scoped token for 6 hours.
-    timeout-minutes: 30
-    # OIDC trusted-publishing requires `id-token: write`. We also need
-    # `contents: write` so the Changesets action can push the "Version Packages"
-    # PR, and `pull-requests: write` so it can open / update that PR.
+    timeout-minutes: 10
     permissions:
-      id-token: write
+      contents: read
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+      publish-plan-artifact-id: ${{ steps.select.outputs.publish-plan-artifact-id }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      # `changeset publish-plan` (which select-mode runs to detect the
+      # `publish` case) shells out to the npm CLI to query the registry, and
+      # Changesets v3 requires npm >= 10.9. The runner's default is older.
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # SHA-pinned like every other changesets sub-action below: these run
+      # the release pipeline, so a mutable tag here is the most sensitive
+      # supply-chain edge in the repo.
+      - name: Select mode
+        id: select
+        uses: changesets/action/select-mode@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+
+  # Pending changesets: bump versions and open/update the "Version Packages" PR.
+  # Holds no `id-token`, so the OIDC credential that can publish to npm simply
+  # does not exist in this job.
+  version:
+    needs: [verify, select-mode]
+    if: needs.select-mode.outputs.mode == 'version'
+    name: version packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # `contents: write` to create the version commit, `pull-requests: write`
+    # to open/update the PR. No `id-token` — see above.
+    permissions:
       contents: write
       pull-requests: write
     steps:
-      # Don't persist the checkout token: this job's GITHUB_TOKEN is
-      # write-scoped, and `bun install` / `bun run build` below execute
-      # third-party lifecycle and build scripts that must not find a
-      # push-capable credential sitting in .git/config. Authenticated
-      # git access is re-added in a dedicated step immediately before
-      # changesets/action (the only step that needs to push).
+      # Don't persist the checkout token: `bun install` below executes
+      # third-party lifecycle scripts, which must not find a push-capable
+      # credential in .git/config. The action doesn't need one — it commits
+      # through the GitHub API (see push-with-git-cli below).
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           # Required by changesets to read the full git history.
           fetch-depth: 0
           persist-credentials: false
 
-      # Bun version is pinned via the root package.json `packageManager`
-      # field — one source of truth shared by local dev and ci.yml.
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: package.json
 
-      # OIDC trusted-publisher flow needs npm ≥ 11.5 — that version is
-      # the first to authenticate to npm using the GitHub OIDC token
-      # rather than an `NPM_TOKEN` secret. Node 24 ships npm 11+ out
-      # of the box, so no explicit upgrade is required (the in-place
-      # `npm install -g npm@latest` from npm 10 is buggy on hosted
-      # runners). `bun publish` does not yet support provenance, so the
-      # actual publish step is `npm publish` under the hood (driven by
-      # `changeset publish`).
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Create or update the Version Packages PR
+        uses: changesets/action/version@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          # Bumps versions in pending changesets, then refreshes the lockfile.
+          script: bun run changeset:version
+          # Leave at the default (false): the version commit is created via
+          # the GitHub API, so GitHub signs it with its own GPG key and it
+          # lands on the PR as Verified rather than unsigned. It also means
+          # no authenticated git remote is ever needed in this job.
+          push-with-git-cli: false
+
+  # No changesets left: build the release artifacts. This job deliberately
+  # holds no write grants and no `id-token` — it is where third-party build
+  # and lifecycle scripts run, so it must not be able to publish anything.
+  # It emits signed-off tarballs that the publish job below uploads verbatim.
+  pack:
+    needs: [verify, select-mode]
+    if: needs.select-mode.outputs.mode == 'publish'
+    name: pack release tarballs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      pack-dir-artifact-id: ${{ steps.pack.outputs.pack-dir-artifact-id }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      # `changeset pack` shells out to the npm CLI to build each tarball.
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # Builds dist/, then rewrites `workspace:*` specifiers to real semver
+      # ranges. This MUST happen before `changeset pack` — the tarballs freeze
+      # each manifest, and npm does not understand the `workspace:` protocol,
+      # so packing first would ship uninstallable packages.
+      #
+      # It runs only on this publish path, so `workspace:*` stays untouched in
+      # the Version PR and on main.
+      - name: Build and rewrite workspace deps
+        run: bun run changeset:prepack
+
+      - name: Pack
+        id: pack
+        uses: changesets/action/pack@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          publish-plan-artifact-id: ${{ needs.select-mode.outputs.publish-plan-artifact-id }}
+
+  # Upload the tarballs packed above and cut the git tags / GitHub releases.
+  # This is the only job that ever holds `id-token: write`, and it runs no
+  # build scripts of its own — it publishes bytes that `pack` already produced.
+  publish:
+    needs: pack
+    name: publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # `id-token: write` for the npm OIDC trusted-publisher flow; `contents:
+    # write` to push git tags and create GitHub releases. No
+    # `pull-requests` grant — this path never touches a PR.
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      # OIDC trusted publishing needs npm >= 11.5 — the first version that
+      # authenticates to npm with the GitHub OIDC token rather than an
+      # NPM_TOKEN secret. Node 24 ships npm 11+, so no explicit upgrade is
+      # needed (the in-place `npm install -g npm@latest` from npm 10 is buggy
+      # on hosted runners). `bun publish` does not support provenance, which
+      # is why the upload runs through the npm CLI under the hood.
       - name: Setup Node.js (for npm publish)
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -75,41 +205,9 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
-      - name: Build packages
-        run: bun run build
-
-      # Re-add authenticated git access only now, after install/build ran
-      # without credentials: changesets/action creates/updates the Version
-      # PR through the API (GITHUB_TOKEN env) but pushes the version branch
-      # with plain `git push`, which needs a token on the remote URL.
-      - name: Authenticate git for the changesets push
-        run: git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # SHA-pinned: this action runs with the write-scoped GITHUB_TOKEN and
-      # drives `npm publish`, so a mutable tag here is the most sensitive
-      # supply-chain edge in the repo.
-      - name: Create Release PR or Publish
-        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+      - name: Publish
+        uses: changesets/action/publish@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         with:
-          # Bumps versions in pending changesets, opens a "Version Packages" PR.
-          version: bun run changeset:version
-          # When the version PR merges, this command runs and publishes.
-          # `npm publish` reads the OIDC token from the runner via
-          # id-token:write and uses the npm trusted-publisher flow — no
-          # NPM_TOKEN secret required if the package is configured as an
-          # OIDC trusted publisher on npmjs.com.
-          #
-          # IMPORTANT: changesets/action splits this string by whitespace
-          # and execs the result directly — there is NO shell involved, so
-          # `&&`, pipes, etc. would be passed as literal positional args.
-          # That's why the chain (build → rewrite workspace:* → publish) is
-          # inside the `changeset:publish` npm script: `bun run` executes
-          # script bodies through a shell, where `&&` does what you expect.
-          # The rewrite runs only in the publish phase (changesets/action
-          # invokes `publish:` only when no pending changesets remain), so
-          # `workspace:*` stays untouched in the Version PR and on main.
-          publish: bun run changeset:publish
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Publishes the already-packed tarballs rather than re-resolving the
+          # workspace, so what reaches npm is exactly what `pack` produced.
+          pack-dir-artifact-id: ${{ needs.pack.outputs.pack-dir-artifact-id }}
