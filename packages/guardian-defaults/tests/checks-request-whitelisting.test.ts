@@ -261,6 +261,79 @@ describe("buildRequestWhitelistingChecks", () => {
     ]);
   });
 
+  it("takes the retargetter path per contract in a whitelist batch", async () => {
+    const RETARGETTER = "0x0000000000000000000000000000000000007e7a" as Address;
+    const ZERO = "0x0000000000000000000000000000000000000000" as Address;
+    const NOW = 1_700_000_000;
+    const stub = makeClient({
+      multicallResponses: [
+        // RC1 stage-1: owner is the retargetter (the factory answer is ignored).
+        [RETARGETTER, false],
+        // RC1: Retargetter.operation() — RC1 attached, 90 days of runway.
+        [
+          [
+            ZERO,
+            RC1,
+            ZERO,
+            0n,
+            BigInt(NOW + 90 * 24 * 60 * 60),
+            0,
+            0,
+            0,
+            0,
+            {
+              mode: 0,
+              owner: ZERO,
+              receiver: ZERO,
+              input: 0n,
+              output: 0n,
+              salt: `0x${"00".repeat(32)}`,
+            },
+            false,
+          ],
+        ],
+        // RC2 stage-1: classic path.
+        [OWNER, true],
+        // whitelist book stage: floor + consumed
+        [10n, false],
+      ],
+      getLogs: (params) => ((params.address ?? []).includes(RC2) ? happyEvents(RC2) : []),
+      latestBlock: 5_500n,
+    });
+
+    const r = await buildRequestWhitelistingChecks({
+      policy: { ...policy, acceptedRetargetters: new Map([[1, new Set<string>([RETARGETTER])]]) },
+      guardianSigner: GUARDIAN,
+    })(ctx(stub.client), {
+      chainId: 1,
+      whitelistBook: BOOK,
+      operation: "whitelist",
+      requestContracts: [RC1, RC2],
+      nonce: "100",
+      deadline: 1_700_000_500,
+    });
+
+    if (r.isErr()) throw r.error;
+    expect(
+      r.value.filter((c) => c.description.endsWith(`(for ${RC1})`)).map((c) => c.description),
+    ).toEqual([
+      `owner of request contract is on the accepted-retargetters list (for ${RC1})`,
+      `request contract was deployed by an accepted factory (for ${RC1})`,
+      `owner of request contract is on the accepted-owners list (for ${RC1})`,
+      `puller role on request contract is held only by accepted parties (for ${RC1})`,
+      `consumer role on request contract is held only by accepted parties (for ${RC1})`,
+      `request contract is the retargetter's attached operation request (for ${RC1})`,
+      `retargetter repayment deadline is at least MIN_RETARGETTER_REPAYMENT_BUFFER ahead of now (for ${RC1})`,
+    ]);
+    expect(r.value.filter((c) => c.description.endsWith(`(for ${RC2})`))).toHaveLength(4);
+    expect(stub.multicalls.map((m) => m.addresses)).toEqual([
+      [RC1.toLowerCase(), FACTORY.toLowerCase()],
+      [RETARGETTER.toLowerCase()],
+      [RC2.toLowerCase(), FACTORY.toLowerCase()],
+      [BOOK.toLowerCase(), BOOK.toLowerCase()],
+    ]);
+  });
+
   it("unwhitelist op runs only nonce + deadline checks", async () => {
     const stub = makeClient({
       multicallResponses: [[10n, false]],
@@ -607,6 +680,15 @@ describe("buildRequestWhitelistingChecks", () => {
     expect(r.isErr()).toBe(true);
     if (r.isErr()) expect(r.error).toBeInstanceOf(ValidationFailedError);
     expect(stub.multicalls.length).toBe(0);
+  });
+
+  it("throws at construction for a fractional minRetargetterRepaymentBufferSeconds", () => {
+    expect(() =>
+      buildRequestWhitelistingChecks({
+        policy: { ...policy, minRetargetterRepaymentBufferSeconds: 0.5 },
+        guardianSigner: GUARDIAN,
+      }),
+    ).toThrow(/minRetargetterRepaymentBufferSeconds/);
   });
 
   it("throws at construction for a non-positive or fractional maxRequestContracts", () => {

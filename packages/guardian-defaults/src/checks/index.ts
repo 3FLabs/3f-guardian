@@ -15,6 +15,7 @@ export {
 
 export {
   buildIntentRequestBindingChecks,
+  DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS,
   zA1OnChainData,
   type A1Deps,
   type A1OnChainData,

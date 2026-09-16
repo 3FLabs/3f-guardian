@@ -547,6 +547,23 @@ limit equal to the configured range never reject a chunk.
   delegates provenance, ownership, and role configuration to whoever controls the listed
   contract — including grants made after it was listed — so treat the set as an extension
   of the Guardian's own trust boundary; every bypass is logged at warn level.
+- **Retargetter path** — `acceptedRetargetters` (optional) switches §A.1 to a second
+  verification path for request contracts whose `owner()` is a listed Retargetter
+  (`grunt/src/manager/rebalancer/Retargetter.sol`). A Retargetter deploys its own Request
+  in `startRetargetting` — through its bound factory, with itself as owner, puller and
+  consumer — so the factory, owner and puller / consumer role checks are emitted as skipped
+  (no role-events scan) and one further read, the retargetter's `operation()`, backs the
+  two checks that replace them: the request contract must be the retargetter's currently
+  attached operation request, and that operation's `repaymentDeadline` must be at least
+  `minRetargetterRepaymentBufferSeconds` ahead of now (default 80 days, the contract's
+  `MIN_DEADLINE_BUFFER` — below it the retargetter refuses to start its loan clock, so a
+  signature could never be consumed; the Request is deployed with 90 days). The deadline
+  check still applies, and §A.4 whitelist ops inherit the path per request contract.
+  Nothing is cached on this path: attachment is live operation state that flips at
+  operation boundaries, and a previously cached classic-path entry whose owner is now a
+  listed retargetter is bypassed rather than replayed. A listed retargetter that does not
+  answer `operation()` is an operator misconfiguration and fails `503`, never a cached
+  client-blamed `422`. Every other request contract takes the classic path unchanged.
 - **Scan budget** — `eventScanDeadlineMs` (optional) bounds a single scan's wall clock;
   when exceeded the request fails `503 upstream_unavailable` instead of holding the
   handler indefinitely.
@@ -581,6 +598,8 @@ case-insensitive.
 type IntentRequestBindingPolicy = {
   maxDeadlineSecondsAhead: number;
   trustedRequestContracts?: ReadonlyMap<number, ReadonlySet<string>>; // listed ⇒ skip every on-chain check
+  acceptedRetargetters?:    ReadonlyMap<number, ReadonlySet<string>>; // owner listed ⇒ retargetter path
+  minRetargetterRepaymentBufferSeconds?: number; // default 80 days (DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS)
   acceptedRequestFactories: ReadonlyMap<number, ReadonlySet<string>>;
   acceptedOwners:           ReadonlyMap<number, ReadonlySet<string>>;
   acceptedPullers:          ReadonlyMap<number, ReadonlySet<string>>;
@@ -633,6 +652,7 @@ to implement adjacent flows the Guardian doesn't sign for):
 | `fundAbi` | Fund contract — `Ownable.owner()` plus role / order-state views. |
 | `requestAbi` | Request contract — `Ownable.owner()` plus the `RolesUpdated` event scanned in §A.1. |
 | `requestFactoryAbi` | Request factory — `isRequest(addr)` for §A.1, `RequestCreated` event for the deployment-block lookup. |
+| `retargetterAbi` | Retargetter — `operation()` (attached `request` + `repaymentDeadline`) for the §A.1 retargetter path. |
 | `positionManagerAbi` | Position manager — `owner / assets / pendingFees / virtualShareOffset` for §A.3. |
 | `positionManagerFactoryAbi` | Position-manager factory — `isPositionManager(addr)` for §A.3. |
 | `whitelistBookAbi` | Whitelist book — `validatorNonceFloor` and `isNonceConsumed` for §A.4. |

@@ -25,6 +25,7 @@ import {
 import {
   type A1OnChainData,
   type IntentRequestBindingPolicy,
+  assertRetargetterPolicy,
   runA1,
 } from "./intent-request-binding.js";
 import type { CheckRunner, CheckRunnerError } from "./types.js";
@@ -122,6 +123,7 @@ export function buildRequestWhitelistingChecks(deps: {
         `got ${policy.maxRequestContracts}`,
     );
   }
+  assertRetargetterPolicy("buildRequestWhitelistingChecks", policy);
 
   return async (
     ctx: SigningContext,

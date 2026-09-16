@@ -716,6 +716,40 @@ describe("guardian coordinator", () => {
     ).toThrow(/GUARDIAN_TRUSTED_REQUEST_CONTRACTS contains invalid address/);
   });
 
+  it("parses the retargetter policy from env", () => {
+    const env = { ...CLI_ENV, GUARDIAN_SIGNER_KEY: `0x${"11".repeat(32)}` };
+
+    // Optional set; a checksum-invalid address is rejected at construction.
+    expect(() =>
+      buildCliGuardianFromEnv({
+        ...env,
+        GUARDIAN_ACCEPTED_RETARGETTERS: "1=0x52908400098527886E0F7030069857D2E4169Ee7",
+      }),
+    ).toThrow(/GUARDIAN_ACCEPTED_RETARGETTERS contains invalid address/);
+    expect(
+      buildCliGuardianFromEnv({
+        ...env,
+        GUARDIAN_ACCEPTED_RETARGETTERS: "1=0x95026A338084241E739250f4F9d2F5745dE81bDd",
+      }).metadata.supportedChains,
+    ).toEqual([1]);
+
+    // The buffer defaults to the on-chain 80-day floor and rejects
+    // negative / fractional values (they would fail every retargetter
+    // request) at construction rather than per request.
+    expect(
+      buildCliGuardianFromEnv({
+        ...env,
+        GUARDIAN_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS: "0",
+      }).metadata.supportedChains,
+    ).toEqual([1]);
+    expect(() =>
+      buildCliGuardianFromEnv({ ...env, GUARDIAN_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS: "-1" }),
+    ).toThrow(/non-negative integer/);
+    expect(() =>
+      buildCliGuardianFromEnv({ ...env, GUARDIAN_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS: "1.5" }),
+    ).toThrow(/non-negative integer/);
+  });
+
   it("makes the validate-and-sign budget configurable", () => {
     const env = { ...CLI_ENV, GUARDIAN_SIGNER_KEY: `0x${"11".repeat(32)}` };
 

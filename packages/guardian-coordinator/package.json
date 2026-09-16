@@ -39,16 +39,16 @@
   "dependencies": {
     "@3flabs/guardian": "workspace:*",
     "@3flabs/guardian-defaults": "workspace:*",
-    "@aws-sdk/client-kms": "^3.1075.0",
-    "@google-cloud/kms": "^5.5.1",
+    "@aws-sdk/client-kms": "^3.1130.0",
+    "@google-cloud/kms": "^6.1.0",
     "@noble/curves": "1.9.1",
-    "better-result": "^2.9.2",
-    "viem": "^2.52.2",
-    "zod": "^4.0.0"
+    "better-result": "^3.0.1",
+    "viem": "^2.56.3",
+    "zod": "^4.6.2"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "vitest": "^4.1.8"
+    "vitest": "^5.0.0"
   },
   "repository": {
     "type": "git",

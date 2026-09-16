@@ -52,15 +52,17 @@ jobs:
       # `packages/guardian-test-fixtures/artifacts/`. Pinned to v1.7.1
       # — the latest foundry release, matching local dev and the
       # bundled fixtures — rather than `stable` so runs are
-      # reproducible. Known tradeoff: the action fetches the foundryup
-      # installer from foundry HEAD at run time, so the action SHA pin
-      # does not pin the installer script, and foundryup's attestation
-      # check is best-effort (it skips rather than fails when `gh` /
-      # the attestation API is unavailable) — the binaries are NOT
-      # cryptographically verified end-to-end. Accepted for now; the
-      # alternative is vendoring a checksummed tarball download.
+      # reproducible. Known tradeoff: the action fetches the standalone
+      # foundryup installer (foundry-rs/foundryup) at run time, so the
+      # action SHA pin does not pin the installer, and foundryup's
+      # attestation check is best-effort (it skips rather than fails
+      # when `gh` / the attestation API is unavailable) — the binaries
+      # are NOT cryptographically verified end-to-end. Accepted for now;
+      # the alternative is vendoring a checksummed tarball download.
+      # v1.9+ is required: foundryup is now a compiled binary, and the
+      # v1.8.0 action ran it through `bash` (foundry-toolchain#170).
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
           version: v1.7.1
 

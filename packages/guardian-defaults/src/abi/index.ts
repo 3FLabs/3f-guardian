@@ -6,6 +6,8 @@ export { requestAbi, ROLE_PULLER, ROLE_CONSUMER } from "./request.js";
 
 export { requestFactoryAbi } from "./request-factory.js";
 
+export { retargetterAbi } from "./retargetter.js";
+
 export { positionManagerAbi, VIRTUAL_ASSETS } from "./position-manager.js";
 
 export { positionManagerFactoryAbi } from "./position-manager-factory.js";

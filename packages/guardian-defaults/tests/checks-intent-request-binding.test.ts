@@ -60,6 +60,43 @@ const trustedPolicy: IntentRequestBindingPolicy = {
   trustedRequestContracts: new Map([[1, new Set<string>([RC])]]),
 };
 
+const RETARGETTER = "0x0000000000000000000000000000000000007e7a" as Address;
+const OTHER_RC = "0xdddddddddddddddddddddddddddddddddddddddd" as Address;
+const ZERO = "0x0000000000000000000000000000000000000000" as Address;
+const DAY = 24 * 60 * 60;
+/** `ctx()` default clock, in Unix seconds. */
+const NOW = 1_700_000_000;
+
+/**
+ * Same accepted sets, plus RETARGETTER on the accepted-retargetters list.
+ * RC is NOT on any accepted set and the factory stub answers `false`, so
+ * a pass can only come from the retargetter path.
+ */
+const retargetterPolicy: IntentRequestBindingPolicy = {
+  ...policy,
+  acceptedRetargetters: new Map([[1, new Set<string>([RETARGETTER])]]),
+};
+
+/**
+ * `Retargetter.operation()` return tuple, in ABI order. Only `request`
+ * (index 1) and `repaymentDeadline` (index 4) are read by the runner.
+ */
+function operation(args: { request: Address; repaymentDeadline: number }): readonly unknown[] {
+  return [
+    ZERO, // positionManager
+    args.request,
+    ZERO, // fund
+    0n, // startedAt
+    BigInt(args.repaymentDeadline),
+    0, // operationMaxYieldBps
+    0, // horizon
+    0, // tickDuration
+    0, // tickThreshold
+    { mode: 0, owner: ZERO, receiver: ZERO, input: 0n, output: 0n, salt: `0x${"00".repeat(32)}` },
+    false, // orderLive
+  ];
+}
+
 const baseBody = {
   chainId: 1,
   facility: "0x0000000000000000000000000000000000000099" as Address,
@@ -1267,6 +1304,336 @@ describe("buildIntentRequestBindingChecks", () => {
 
     expect(result.isErr()).toBe(true);
     expect(stub.multicalls).toHaveLength(1);
+  });
+});
+
+describe("buildIntentRequestBindingChecks — retargetter path", () => {
+  it("takes the retargetter path when owner() is an accepted retargetter, ignoring the factory answer", async () => {
+    const stub = makeClient({
+      multicallResponses: [
+        // Stage 1: owner is the retargetter; the factory does NOT claim RC.
+        [RETARGETTER, false],
+        // Retargetter.operation(): RC attached, 90 days of repayment runway.
+        [operation({ request: RC, repaymentDeadline: NOW + 90 * DAY })],
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    if (result.isErr()) throw result.error;
+    expect(result.value).toEqual([
+      {
+        description: "owner of request contract is on the accepted-retargetters list",
+        passed: true,
+        skipped: false,
+      },
+      {
+        description: "request contract was deployed by an accepted factory",
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: "owner of request contract is on the accepted-owners list",
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: "puller role on request contract is held only by accepted parties",
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: "consumer role on request contract is held only by accepted parties",
+        passed: true,
+        skipped: true,
+      },
+      {
+        description: "request contract is the retargetter's attached operation request",
+        passed: true,
+        skipped: false,
+      },
+      {
+        description:
+          "retargetter repayment deadline is at least MIN_RETARGETTER_REPAYMENT_BUFFER ahead of now",
+        passed: true,
+        skipped: false,
+      },
+      {
+        description: "deadline within MAX_DEADLINE_SECONDS_AHEAD of now",
+        passed: true,
+        skipped: false,
+      },
+    ]);
+    // Exactly two reads — stage 1 and operation() — and no scan.
+    expect(stub.multicalls.map((m) => m.functionNames)).toEqual([
+      ["owner", "isRequest"],
+      ["operation"],
+    ]);
+    expect(stub.getBlockNumberCalls).toBe(0);
+    expect(stub.getLogsCalls).toBe(0);
+  });
+
+  it("fails when the retargetter is attached to a different request contract", async () => {
+    const stub = makeClient({
+      multicallResponses: [
+        [RETARGETTER, false],
+        [operation({ request: OTHER_RC, repaymentDeadline: NOW + 90 * DAY })],
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error).toBeInstanceOf(ValidationFailedError);
+    const attached = (result.error as ValidationFailedError).checks.find((c) =>
+      c.description.includes("attached operation request"),
+    );
+    expect(attached?.passed).toBe(false);
+    expect(attached?.reason).toContain(OTHER_RC);
+    // The buffer check is still evaluated (and passes) — one read, all entries.
+    const buffer = (result.error as ValidationFailedError).checks.find((c) =>
+      c.description.includes("MIN_RETARGETTER_REPAYMENT_BUFFER"),
+    );
+    expect(buffer?.passed).toBe(true);
+  });
+
+  it("fails when the retargetter has no active operation (request = address(0))", async () => {
+    const stub = makeClient({
+      multicallResponses: [
+        [RETARGETTER, false],
+        [operation({ request: ZERO, repaymentDeadline: 0 })],
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    const attached = (result.error as ValidationFailedError).checks.find((c) =>
+      c.description.includes("attached operation request"),
+    );
+    expect(attached?.passed).toBe(false);
+    expect(attached?.reason).toContain("no active operation");
+  });
+
+  it("fails when the repayment deadline is below the default 80-day buffer, and passes at exactly the floor", async () => {
+    const below = makeClient({
+      multicallResponses: [
+        [RETARGETTER, false],
+        [operation({ request: RC, repaymentDeadline: NOW + 80 * DAY - 1 })],
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy });
+
+    const rejected = await run(ctx(below.client), baseBody);
+    expect(rejected.isErr()).toBe(true);
+    if (rejected.isErr()) {
+      expect(rejected.error).toBeInstanceOf(ValidationFailedError);
+      const buffer = (rejected.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("MIN_RETARGETTER_REPAYMENT_BUFFER"),
+      );
+      expect(buffer?.passed).toBe(false);
+      expect(buffer?.reason).toContain(`min-buffer=${80 * DAY}`);
+    }
+
+    const atFloor = makeClient({
+      multicallResponses: [
+        [RETARGETTER, false],
+        [operation({ request: RC, repaymentDeadline: NOW + 80 * DAY })],
+      ],
+    });
+    expect((await run(ctx(atFloor.client), baseBody)).isOk()).toBe(true);
+  });
+
+  it("honours a custom minRetargetterRepaymentBufferSeconds (0 = only not yet expired)", async () => {
+    const run = buildIntentRequestBindingChecks({
+      policy: { ...retargetterPolicy, minRetargetterRepaymentBufferSeconds: 0 },
+    });
+
+    const now = makeClient({
+      multicallResponses: [
+        [RETARGETTER, false],
+        [operation({ request: RC, repaymentDeadline: NOW })],
+      ],
+    });
+    expect((await run(ctx(now.client), baseBody)).isOk()).toBe(true);
+
+    const expired = makeClient({
+      multicallResponses: [
+        [RETARGETTER, false],
+        [operation({ request: RC, repaymentDeadline: NOW - 1 })],
+      ],
+    });
+    expect((await run(ctx(expired.client), baseBody)).isErr()).toBe(true);
+  });
+
+  it("still enforces the signature deadline on the retargetter path", async () => {
+    const stub = makeClient({
+      multicallResponses: [
+        [RETARGETTER, false],
+        [operation({ request: RC, repaymentDeadline: NOW + 90 * DAY })],
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy });
+
+    const result = await run(ctx(stub.client), { ...baseBody, deadline: NOW + 1_000 });
+
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    const deadline = (result.error as ValidationFailedError).checks.find((c) =>
+      c.description.includes("MAX_DEADLINE_SECONDS_AHEAD"),
+    );
+    expect(deadline?.passed).toBe(false);
+  });
+
+  it("keeps the classic path for an owner that is not on the accepted-retargetters set", async () => {
+    // OWNER is an accepted owner but not a retargetter; the factory
+    // answer (`false`) now matters and fails check #1 — no operation() read.
+    const stub = makeClient({ multicallResponses: [[OWNER, false]] });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error).toBeInstanceOf(ValidationFailedError);
+    const factory = (result.error as ValidationFailedError).checks.find((c) =>
+      c.description.includes("deployed by"),
+    );
+    expect(factory?.passed).toBe(false);
+    expect(stub.multicalls).toHaveLength(1);
+  });
+
+  it("scopes the accepted-retargetters set per chain and ignores address case", async () => {
+    const run = buildIntentRequestBindingChecks({
+      policy: {
+        ...policy,
+        // Listed for chain 1 only, in the opposite case to the on-chain owner.
+        acceptedRetargetters: new Map([[1, new Set<string>([RETARGETTER.toUpperCase()])]]),
+      },
+    });
+
+    // Chain 8453 is not covered, so the classic path runs and fails on
+    // the factory check without ever reading operation().
+    const otherChainStub = makeClient({ multicallResponses: [[RETARGETTER, false]] });
+    const other = await run(ctx(otherChainStub.client), { ...baseBody, chainId: 8453 });
+    expect(other.isErr()).toBe(true);
+    expect(otherChainStub.multicalls).toHaveLength(1);
+
+    const stub = makeClient({
+      multicallResponses: [
+        [RETARGETTER, false],
+        [operation({ request: RC, repaymentDeadline: NOW + 90 * DAY })],
+      ],
+    });
+    expect((await run(ctx(stub.client), baseBody)).isOk()).toBe(true);
+  });
+
+  it("matches the attached request case-insensitively", async () => {
+    const stub = makeClient({
+      multicallResponses: [
+        [RETARGETTER, false],
+        [operation({ request: RC.toUpperCase() as Address, repaymentDeadline: NOW + 90 * DAY })],
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy });
+    expect((await run(ctx(stub.client), baseBody)).isOk()).toBe(true);
+  });
+
+  it("fails 503 — never a 422 — when the listed retargetter does not answer operation() (operator misconfiguration)", async () => {
+    const zeroData = new ContractFunctionExecutionError(new AbiDecodingZeroDataError(), {
+      abi: [],
+      functionName: "operation",
+    });
+    const stub = makeClient({ multicallResponses: [[RETARGETTER, false], zeroData] });
+    const cache = inMemoryCache(zA1OnChainData);
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy, cache });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error).toBeInstanceOf(UpstreamUnavailableError);
+    expect(await cache.get(`1:${RC.toLowerCase()}`)).toBeUndefined();
+  });
+
+  it("propagates an operation() transport failure as UpstreamUnavailableError", async () => {
+    const stub = makeClient({
+      multicallResponses: [[RETARGETTER, false], new HttpRequestError({ url: "http://rpc" })],
+    });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error).toBeInstanceOf(UpstreamUnavailableError);
+  });
+
+  it("never writes the cache, and re-reads on every call", async () => {
+    const stub = makeClient({
+      multicallResponses: [
+        [RETARGETTER, false],
+        [operation({ request: RC, repaymentDeadline: NOW + 90 * DAY })],
+        [RETARGETTER, false],
+        [operation({ request: RC, repaymentDeadline: NOW + 90 * DAY })],
+      ],
+    });
+    const cache = inMemoryCache(zA1OnChainData);
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy, cache });
+
+    expect((await run(ctx(stub.client), baseBody)).isOk()).toBe(true);
+    // Attachment is live operation state: nothing to amortise, and an
+    // entry must never outlive the operation that made it true.
+    expect(await cache.get(`1:${RC.toLowerCase()}`)).toBeUndefined();
+    expect((await run(ctx(stub.client), baseBody)).isOk()).toBe(true);
+    expect(stub.multicalls).toHaveLength(4);
+  });
+
+  it("bypasses a cached classic-path entry whose owner is now an accepted retargetter", async () => {
+    // A `resolved` entry written before the retargetter was listed would
+    // otherwise keep RC on the classic path (and failing the owner
+    // check) until the TTL ran out.
+    const cache = inMemoryCache(zA1OnChainData);
+    await cache.set(`1:${RC.toLowerCase()}`, {
+      kind: "resolved",
+      factory: FACTORY,
+      owner: RETARGETTER,
+      holders: new Map<Address, bigint>([[RETARGETTER, ROLE_PULLER | ROLE_CONSUMER]]),
+    } satisfies A1OnChainData);
+    const stub = makeClient({
+      multicallResponses: [
+        [RETARGETTER, true],
+        [operation({ request: RC, repaymentDeadline: NOW + 90 * DAY })],
+      ],
+    });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicy, cache });
+
+    const result = await run(ctx(stub.client), baseBody);
+
+    if (result.isErr()) throw result.error;
+    expect(result.value[0]?.description).toBe(
+      "owner of request contract is on the accepted-retargetters list",
+    );
+    expect(stub.multicalls).toHaveLength(2);
+    // The stale entry is left to expire — the bypass reads, it does not evict.
+    expect(await cache.get(`1:${RC.toLowerCase()}`)).toBeDefined();
+  });
+
+  it("throws at construction for a fractional or negative minRetargetterRepaymentBufferSeconds", () => {
+    expect(() =>
+      buildIntentRequestBindingChecks({
+        policy: { ...retargetterPolicy, minRetargetterRepaymentBufferSeconds: 1.5 },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      buildIntentRequestBindingChecks({
+        policy: { ...retargetterPolicy, minRetargetterRepaymentBufferSeconds: -1 },
+      }),
+    ).toThrow(/non-negative integer/);
   });
 });
 

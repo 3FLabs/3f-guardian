@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { type Address } from "viem";
+import { encodeFunctionData, parseAbi, type Address } from "viem";
 
 import { ValidationFailedError } from "@3flabs/guardian";
 import { type AddressBook, createIntegrationFixture } from "@3flabs/guardian-test-fixtures";
@@ -112,5 +112,142 @@ describe("§A.1 intent-request-binding — on-chain", () => {
     expect(res.isErr()).toBe(true);
     if (!res.isErr()) return;
     expect(res.error).toBeInstanceOf(ValidationFailedError);
+  });
+});
+
+describe("§A.1 intent-request-binding — retargetter path, on-chain", () => {
+  const fixture = createIntegrationFixture();
+  beforeAll(fixture.setup);
+
+  function retargetterPolicyFor(book: AddressBook): IntentRequestBindingPolicy {
+    return {
+      ...policyFor(book),
+      acceptedRetargetters: new Map([[31337, new Set<string>([book.mockRetargetter])]]),
+    };
+  }
+
+  it("keeps a retargetter-owned request on the classic path when no retargetter is listed", async () => {
+    const { book, clients } = fixture.snapshot();
+    const ctx = makeSigningContext({ client: clients.publicClient, chainId: book.chainId });
+    const run = buildIntentRequestBindingChecks({ policy: policyFor(book) });
+
+    // The retargetter's Request comes from the accepted factory, but its
+    // owner / puller / consumer is the retargetter itself, which is on
+    // none of the classic accepted sets.
+    const res = await run(ctx, {
+      chainId: book.chainId,
+      facility: book.facility,
+      intent: { id: "1" },
+      requestContract: book.retargetterRequest,
+      deadline: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    expect(res.isErr()).toBe(true);
+    if (!res.isErr()) return;
+    expect(res.error).toBeInstanceOf(ValidationFailedError);
+    const owner = (res.error as ValidationFailedError).checks.find((c) =>
+      c.description.includes("accepted-owners"),
+    );
+    expect(owner?.passed).toBe(false);
+  });
+
+  it("passes for the retargetter's attached request via its live operation()", async () => {
+    const { book, clients } = fixture.snapshot();
+    const ctx = makeSigningContext({ client: clients.publicClient, chainId: book.chainId });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicyFor(book) });
+
+    const res = await run(ctx, {
+      chainId: book.chainId,
+      facility: book.facility,
+      intent: { id: "1" },
+      requestContract: book.retargetterRequest,
+      deadline: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    expect(res.isOk(), res.isErr() ? JSON.stringify(res.error) : "").toBe(true);
+    if (!res.isOk()) return;
+    for (const c of res.value) expect(c.passed, c.description).toBe(true);
+    expect(res.value.map((c) => [c.description, c.skipped])).toEqual([
+      ["owner of request contract is on the accepted-retargetters list", false],
+      ["request contract was deployed by an accepted factory", true],
+      ["owner of request contract is on the accepted-owners list", true],
+      ["puller role on request contract is held only by accepted parties", true],
+      ["consumer role on request contract is held only by accepted parties", true],
+      ["request contract is the retargetter's attached operation request", false],
+      [
+        "retargetter repayment deadline is at least MIN_RETARGETTER_REPAYMENT_BUFFER ahead of now",
+        false,
+      ],
+      ["deadline within MAX_DEADLINE_SECONDS_AHEAD of now", false],
+    ]);
+  });
+
+  it("fails when the operation's repayment deadline is inside the buffer", async () => {
+    const { book, clients } = fixture.snapshot();
+    const ctx = makeSigningContext({ client: clients.publicClient, chainId: book.chainId });
+    // The fixture Request has ~90 days of runway; demand more than that.
+    const run = buildIntentRequestBindingChecks({
+      policy: {
+        ...retargetterPolicyFor(book),
+        minRetargetterRepaymentBufferSeconds: 91 * 24 * 3600,
+      },
+    });
+
+    const res = await run(ctx, {
+      chainId: book.chainId,
+      facility: book.facility,
+      intent: { id: "1" },
+      requestContract: book.retargetterRequest,
+      deadline: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    expect(res.isErr()).toBe(true);
+    if (!res.isErr()) return;
+    expect(res.error).toBeInstanceOf(ValidationFailedError);
+    const buffer = (res.error as ValidationFailedError).checks.find((c) =>
+      c.description.includes("MIN_RETARGETTER_REPAYMENT_BUFFER"),
+    );
+    expect(buffer?.passed).toBe(false);
+  });
+
+  // Mutates the mock's attachment — keep it last in this block.
+  it("fails once the retargetter is attached to another request", async () => {
+    const { book, clients } = fixture.snapshot();
+    // `setOperation` is unauthenticated by design (see
+    // contracts/MockRetargetter.sol); re-attach the retargetter to the
+    // classic fixture Request so `book.retargetterRequest` is no longer
+    // its operation request.
+    const block = await clients.publicClient.getBlock();
+    const tx = await clients.walletClient.sendTransaction({
+      account: clients.walletClient.account!,
+      to: book.mockRetargetter,
+      data: encodeFunctionData({
+        abi: parseAbi(["function setOperation(address,uint40)"]),
+        functionName: "setOperation",
+        args: [book.request, Number(block.timestamp) + 90 * 24 * 3600],
+      }),
+      chain: clients.walletClient.chain,
+    });
+    await clients.publicClient.waitForTransactionReceipt({ hash: tx });
+
+    const ctx = makeSigningContext({ client: clients.publicClient, chainId: book.chainId });
+    const run = buildIntentRequestBindingChecks({ policy: retargetterPolicyFor(book) });
+
+    const res = await run(ctx, {
+      chainId: book.chainId,
+      facility: book.facility,
+      intent: { id: "1" },
+      requestContract: book.retargetterRequest,
+      deadline: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    expect(res.isErr()).toBe(true);
+    if (!res.isErr()) return;
+    expect(res.error).toBeInstanceOf(ValidationFailedError);
+    const attached = (res.error as ValidationFailedError).checks.find((c) =>
+      c.description.includes("attached operation request"),
+    );
+    expect(attached?.passed).toBe(false);
+    expect(attached?.reason).toContain(book.request);
   });
 });

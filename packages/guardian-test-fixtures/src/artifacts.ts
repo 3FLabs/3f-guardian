@@ -15,6 +15,7 @@ import erc1967Factory from "../artifacts/ERC1967Factory.json" with { type: "json
 import facility from "../artifacts/Facility.json" with { type: "json" };
 import intentDescriptor from "../artifacts/IntentDescriptor.json" with { type: "json" };
 import mockErc20 from "../artifacts/MockERC20.json" with { type: "json" };
+import mockRetargetter from "../artifacts/MockRetargetter.json" with { type: "json" };
 import multicall3 from "../artifacts/Multicall3.json" with { type: "json" };
 import ownableMockFund from "../artifacts/OwnableMockFund.json" with { type: "json" };
 import positionManagerFactory from "../artifacts/PositionManagerFactory.json" with { type: "json" };
@@ -44,6 +45,7 @@ export const artifacts = {
   RequestWhitelist: cast(requestWhitelist),
   ERC1967Factory: cast(erc1967Factory),
   OwnableMockFund: cast(ownableMockFund),
+  MockRetargetter: cast(mockRetargetter),
   Multicall3: cast(multicall3),
 } as const;
 
