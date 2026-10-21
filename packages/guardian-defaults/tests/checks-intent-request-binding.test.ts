@@ -111,6 +111,7 @@ type Stub = {
   getLogsCalls: number;
   getBlockNumberCalls: number;
   getBlockNumberArgs: Array<{ cacheTime?: number } | undefined>;
+  getCodeBlocks: bigint[];
 };
 
 /**
@@ -144,6 +145,8 @@ function makeClient(args: {
   latestBlock?: bigint;
   staleLatestBlock?: bigint;
   getBlockNumberThrows?: Error;
+  /** Historical `getCode`; omitted = the call throws, like a non-archive node. */
+  getCode?: (blockNumber: bigint) => `0x${string}` | undefined;
 }): Stub {
   const stub: Stub = {
     client: undefined as never,
@@ -151,6 +154,7 @@ function makeClient(args: {
     getLogsCalls: 0,
     getBlockNumberCalls: 0,
     getBlockNumberArgs: [],
+    getCodeBlocks: [],
   };
   let i = 0;
   const responses = args.multicallResponses ?? [];
@@ -188,6 +192,11 @@ function makeClient(args: {
         return args.staleLatestBlock;
       }
       return args.latestBlock ?? 100_000n;
+    },
+    getCode: async (params: { blockNumber: bigint }) => {
+      stub.getCodeBlocks.push(params.blockNumber);
+      if (!args.getCode) throw new Error("missing trie node");
+      return args.getCode(params.blockNumber);
     },
     getLogs: async (params: {
       address?: readonly Address[];
@@ -519,6 +528,70 @@ describe("buildIntentRequestBindingChecks", () => {
       expect(puller?.reason).toMatch(/onLookbackExhausted=fail/);
       expect(consumer?.passed).toBe(false);
     }
+    // The stub's getCode throws like a non-archive node, so the scan ran.
+    expect(stub.getCodeBlocks).toEqual([4_999n]);
+    expect(stub.getLogsCalls).toBe(6);
+  });
+
+  it("onLookbackExhausted='fail' decides 'older than the window' with one getCode before scanning", async () => {
+    const run = buildIntentRequestBindingChecks({
+      policy: { ...policy, onLookbackExhausted: "fail" },
+    });
+    // Window is [5_000, 10_000]; the probe reads the block before it.
+    const predates = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 10_000n,
+      getCode: () => "0x6080",
+    });
+    const r = await run(ctx(predates.client), baseBody);
+    expect(r.isErr() && (r.error as ValidationFailedError).checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          description: "puller role on request contract is held only by accepted parties",
+          passed: false,
+          reason: expect.stringMatching(/onLookbackExhausted=fail/),
+        }),
+      ]),
+    );
+    expect(predates.getCodeBlocks).toEqual([4_999n]);
+    expect(predates.getLogsCalls).toBe(0);
+
+    // No code before the window: the scan runs and resolves the deployment.
+    const inWindow = makeClient({
+      multicallResponses: [[OWNER, true]],
+      latestBlock: 10_000n,
+      getCode: () => undefined,
+      getLogs: () => [
+        {
+          address: FACTORY,
+          eventName: "RequestCreated",
+          blockNumber: 9_500n,
+          logIndex: 0,
+          args: { request: RC },
+        },
+        {
+          address: RC,
+          eventName: "RolesUpdated",
+          blockNumber: 9_500n,
+          logIndex: 1,
+          args: { user: PULLER, roles: ROLE_PULLER },
+        },
+        {
+          address: RC,
+          eventName: "RolesUpdated",
+          blockNumber: 9_500n,
+          logIndex: 2,
+          args: { user: CONSUMER, roles: ROLE_CONSUMER },
+        },
+      ],
+    });
+    expect((await run(ctx(inWindow.client), baseBody)).isOk()).toBe(true);
+    expect(inWindow.getLogsCalls).toBe(1);
+
+    // Under skip the window scan is the only rogue-grant evidence: no probe.
+    const skip = makeClient({ multicallResponses: [[OWNER, true]], latestBlock: 10_000n });
+    await buildIntentRequestBindingChecks({ policy })(ctx(skip.client), baseBody);
+    expect(skip.getCodeBlocks).toEqual([]);
   });
 
   it("replays a stale cached tooOld entry without partialHolders as skipped (legacy cache shape)", async () => {

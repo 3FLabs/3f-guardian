@@ -120,8 +120,9 @@ export function buildGuardianFromEnv(
       env.GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
       DEFAULT_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
     ),
-    // Unset = the library default ("skip"): role checks on a contract older
-    // than the lookback window are skipped. "fail" rejects them instead.
+    // Unset = "fail": a contract older than the lookback window is rejected
+    // because its role holders cannot be replayed. "skip" signs it with the
+    // role checks skipped and must be set explicitly.
     onLookbackExhausted: lookbackExhaustedDisposition(env.GUARDIAN_ON_LOOKBACK_EXHAUSTED),
   };
   const acceptedWhitelistBooks = env.GUARDIAN_ACCEPTED_WHITELIST_BOOKS?.trim()
@@ -468,9 +469,9 @@ function parseAddressMap(value: string, name: string): Map<number, Set<string>> 
   return map;
 }
 
-function lookbackExhaustedDisposition(value: string | undefined): "skip" | "fail" | undefined {
+function lookbackExhaustedDisposition(value: string | undefined): "skip" | "fail" {
   const raw = value?.trim();
-  if (!raw) return undefined;
+  if (!raw) return "fail";
   if (raw === "skip" || raw === "fail") return raw;
   throw new Error(`GUARDIAN_ON_LOOKBACK_EXHAUSTED must be skip or fail, got ${raw}`);
 }
