@@ -56,6 +56,11 @@ Optional env:
 - `GUARDIAN_MAX_DEADLINE_SECONDS_AHEAD` default `600`
 - `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` default `10000`
 - `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` default `1000000`
+- `GUARDIAN_ON_LOOKBACK_EXHAUSTED` `skip` (the default when unset) or `fail`. What the
+  puller / consumer / executor role checks do when a request contract was deployed
+  before the lookback window, so its role holders cannot be fully replayed: `skip`
+  emits them as skipped and signs; `fail` rejects (422). A rogue grant observed inside
+  the window fails either way.
 - `GUARDIAN_MAX_NONCE_ABOVE_FLOOR` default `100`, for request-whitelisting nonce windows
 - `GUARDIAN_FLASH_LOAN_REQUEST_FACTORIES` optional `chainId=addr,addr;chainId=addr`
 - `GUARDIAN_FLASH_LOAN_REQUEST_EXECUTORS` optional `chainId=addr,addr;chainId=addr`
@@ -86,6 +91,43 @@ Optional env:
   `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` — or `request_whitelisting` batches, which
   scan per request contract — need longer than the default.
 - `GUARDIAN_SWAP_PRICE_TOLERANCE_BPS` default `1`
+
+## One process per chain (Base)
+
+Run one coordinator process per chain. Each chain's grunt-api has its own coordinator,
+API keys and signing requests, and the lookback, scan range and sign budget above are
+process-wide. A process also works through its signing requests one at a time, so a
+deep scan on one chain must not hold up another's. For Base mainnet (8453), alongside
+the Ethereum process:
+
+| Variable | Base value | Why |
+|---|---|---|
+| `COORDINATOR_BASE_URL` | `https://guardian.3f.xyz/v2/chains/8453` | Base's coordinator. The path prefix is kept, so polls go to `…/v2/chains/8453/v1/guardian/signing-requests`. |
+| `COORDINATOR_API_KEY` | the key issued by Base's coordinator | Keys live in each chain's database; Ethereum's key is not valid on Base. |
+| `CHAIN_IDS` | `8453` | |
+| `GUARDIAN_CHAIN_RPC_URLS` | `8453=<Base RPC>` | Must answer `eth_getLogs` over `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` blocks completely. |
+| `GUARDIAN_REQUEST_FACTORIES`, `GUARDIAN_REQUEST_OWNERS`, `GUARDIAN_REQUEST_PULLERS`, `GUARDIAN_REQUEST_CONSUMERS`, `GUARDIAN_ACCEPTED_FUNDS`, `GUARDIAN_FUND_OWNERS`, `GUARDIAN_PM_FACTORIES`, `GUARDIAN_PM_OWNERS` (and the optional flash-loan / whitelist-book / retargetter sets) | `8453=<Base addresses>` | Base deployments and Base signer addresses; nothing carries over from Ethereum. |
+| `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` | `10000`, or the provider's `eth_getLogs` cap if lower | |
+| `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` | `5000000` | About 116 days at 2 s blocks, which covers a 90-day request. The default 1,000,000 is about 139 days at Ethereum's 12 s but only about 23 days on Base. |
+| `GUARDIAN_ON_LOOKBACK_EXHAUSTED` | `fail` | Reject rather than sign for a contract whose role holders could not be replayed. |
+| `GUARDIAN_SIGN_TIMEOUT_MS` | `300000` | Covers a full 5M-block scan; see below. |
+| `GUARDIAN_SIGNER_PROVIDER`, `GUARDIAN_SIGNER_ADDRESS`, signer key settings | the guardian's Base key | |
+
+A role-events scan is one `eth_getLogs` per `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` blocks,
+walking back from head until the request's deployment. A request created moments
+before its binding costs one call. A contract older than the window costs
+`5000000 / 10000 = 500` sequential calls. Measured 21 Oct 2026 with the scan's address
+filter: 10,000-block chunks took a mean of 275 ms on a public Base Sepolia node and
+325 ms on a paid Ethereum endpoint, so 500 chunks take about 140–165 s. On a public
+Base mainnet node, 5,000-block chunks took a mean of 729 ms (up to 1.5 s). Budget 300 s
+and size the provider for it. `request_whitelisting` scans its request contracts one
+after another inside the same budget, so a batch of old contracts can still time out.
+A timeout is a 503: nothing is signed and the request is retried on the next poll.
+Size the heartbeat-absence alert to that worst-case cycle.
+
+For Base Sepolia (84532) use `COORDINATOR_BASE_URL=https://guardian.dev.gcp.3f.xyz/v2/chains/84532`,
+`CHAIN_IDS=84532` and `84532=` keys in every chain-keyed variable, with the same
+lookback, disposition and budget.
 
 ## Lifecycle and heartbeat lines
 

@@ -120,6 +120,9 @@ export function buildGuardianFromEnv(
       env.GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
       DEFAULT_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
     ),
+    // Unset = the library default ("skip"): role checks on a contract older
+    // than the lookback window are skipped. "fail" rejects them instead.
+    onLookbackExhausted: lookbackExhaustedDisposition(env.GUARDIAN_ON_LOOKBACK_EXHAUSTED),
   };
   const acceptedWhitelistBooks = env.GUARDIAN_ACCEPTED_WHITELIST_BOOKS?.trim()
     ? parseAddressMap(env.GUARDIAN_ACCEPTED_WHITELIST_BOOKS, "GUARDIAN_ACCEPTED_WHITELIST_BOOKS")
@@ -463,6 +466,13 @@ function parseAddressMap(value: string, name: string): Map<number, Set<string>> 
   }
   if (map.size === 0) throw new Error(`${name} must not be empty`);
   return map;
+}
+
+function lookbackExhaustedDisposition(value: string | undefined): "skip" | "fail" | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  if (raw === "skip" || raw === "fail") return raw;
+  throw new Error(`GUARDIAN_ON_LOOKBACK_EXHAUSTED must be skip or fail, got ${raw}`);
 }
 
 function positiveBigInt(value: string | undefined, fallback: bigint): bigint {
