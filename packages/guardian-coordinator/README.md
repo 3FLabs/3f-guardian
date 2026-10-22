@@ -56,6 +56,17 @@ Optional env:
 - `GUARDIAN_MAX_DEADLINE_SECONDS_AHEAD` default `600`
 - `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` default `10000`
 - `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` default `1000000`
+- `GUARDIAN_ON_LOOKBACK_EXHAUSTED` `fail` (the default when unset) or `skip`. What the
+  puller / consumer / executor role checks do when a request contract was deployed
+  before the lookback window, so its role holders cannot be fully replayed: `fail`
+  rejects (422); `skip` emits them as skipped and signs. A rogue grant observed inside
+  the window fails either way. Any other value stops startup, and a misspelled variable
+  name leaves the default, so only an exact `skip` turns verification off. Under `fail`
+  the coordinator first reads `eth_getCode` for the request contract at the block just
+  before the window: code there means the contract predates the window, and it is
+  rejected without scanning any logs. That read needs an archive RPC; if the RPC cannot
+  serve it, the scan runs as before. `skip` always scans the window, since partial
+  in-window data is its only rogue-grant evidence.
 - `GUARDIAN_MAX_NONCE_ABOVE_FLOOR` default `100`, for request-whitelisting nonce windows
 - `GUARDIAN_FLASH_LOAN_REQUEST_FACTORIES` optional `chainId=addr,addr;chainId=addr`
 - `GUARDIAN_FLASH_LOAN_REQUEST_EXECUTORS` optional `chainId=addr,addr;chainId=addr`
@@ -84,8 +95,52 @@ Optional env:
 - `GUARDIAN_SIGN_TIMEOUT_MS` default `6000`; budget for one whole validate-and-sign
   call, including the on-chain reads. Raise it when role-events scans over a wide
   `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` — or `request_whitelisting` batches, which
-  scan per request contract — need longer than the default.
+  scan per request contract — need longer than the default. A signing request that hits
+  this deadline is logged (`failed guardian signing request <id>: sign did not complete
+  within <n>ms`) and retried on the next poll, so one slow RPC or KMS call doesn't drop
+  it. After its second sign deadline the line ends `; not retrying it` and the request is
+  skipped for the life of the process: the same scan would time out again and hold every
+  request behind it for another budget. grunt-api has no rejection endpoint, so the
+  request stays unsigned until its deadline. Faster failures (an RPC error, a 422) are
+  retried on the next poll as before.
 - `GUARDIAN_SWAP_PRICE_TOLERANCE_BPS` default `1`
+
+## One process per chain
+
+Run one coordinator process per chain. Each chain's grunt-api has its own coordinator,
+API keys and signing requests, and the lookback, scan range and sign budget above are
+process-wide. A process also works through its signing requests one at a time, so a
+deep scan on one chain must not hold up another's. For each chain:
+
+| Variable | Value | Why |
+|---|---|---|
+| `COORDINATOR_BASE_URL` | `https://<coordinator host>/v2/chains/<chainId>` | That chain's coordinator. The path prefix is kept, so polls go to `…/v2/chains/<chainId>/v1/guardian/signing-requests`. |
+| `COORDINATOR_API_KEY` | the key issued by that chain's coordinator | Keys live in each chain's database; one chain's key is not valid on another. |
+| `CHAIN_IDS` | `<chainId>` | |
+| `GUARDIAN_CHAIN_RPC_URLS` | `<chainId>=<archive RPC>` | Must answer `eth_getLogs` over `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` blocks completely, and `eth_getCode` at historical blocks (archive) so old request contracts are rejected without a scan. |
+| `GUARDIAN_REQUEST_FACTORIES`, `GUARDIAN_REQUEST_OWNERS`, `GUARDIAN_REQUEST_PULLERS`, `GUARDIAN_REQUEST_CONSUMERS`, `GUARDIAN_ACCEPTED_FUNDS`, `GUARDIAN_FUND_OWNERS`, `GUARDIAN_PM_FACTORIES`, `GUARDIAN_PM_OWNERS` (and the optional flash-loan / whitelist-book / retargetter sets) | `<chainId>=<addresses>` | That chain's deployments and signer addresses; nothing carries over between chains. |
+| `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` | `10000`, or the provider's `eth_getLogs` cap if lower | |
+| `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` | the longest request lifetime, in that chain's blocks | The default 1,000,000 is about 139 days at 12 s blocks; a chain with shorter blocks needs proportionally more. |
+| `GUARDIAN_ON_LOOKBACK_EXHAUSTED` | unset (`fail`) | Reject rather than sign for a contract whose role holders could not be replayed. Setting `fail` explicitly is equivalent. |
+| `GUARDIAN_SIGN_TIMEOUT_MS` | enough for the worst-case scan; see below | |
+| `GUARDIAN_SIGNER_PROVIDER`, `GUARDIAN_SIGNER_ADDRESS`, signer key settings | the guardian's key for that chain | |
+
+A role-events scan is one `eth_getLogs` per `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` blocks,
+walking back from head until the request's deployment. A request created moments
+before its binding costs one call. A contract older than the window costs one archive
+`eth_getCode` and no scan: it is rejected straight away. The most a scan can cost is a
+contract deployed just inside the window: lookback / range sequential calls, for
+example `5000000 / 10000 = 500`. Measured 21 Oct 2026 with the scan's address filter:
+10,000-block chunks took a mean of 275–325 ms on a public testnet node and on a paid
+Ethereum endpoint, so 500 chunks take about 140–165 s. On a slow public node,
+5,000-block chunks took a mean of 729 ms (up to 1.5 s), about 730 s for the same
+window, so a public node may not fit the budget. For a window that size, budget
+300 s and size the provider for it. `request_whitelisting` scans its request
+contracts one after another inside the same budget, so a batch of contracts deployed
+early in the window can still time out. A timeout is a 503: nothing is signed. The
+request is retried once on the next poll, and after its second timeout this process
+stops retrying it, so a stuck request costs the queue two budgets, not one per poll.
+Size the heartbeat-absence alert to that worst-case cycle.
 
 ## Lifecycle and heartbeat lines
 

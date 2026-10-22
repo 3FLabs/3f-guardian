@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Result } from "better-result";
-import type { RequestWhitelistingResponse, SigningSuccess } from "@3flabs/guardian";
+import {
+  UpstreamUnavailableError,
+  type RequestWhitelistingResponse,
+  type SigningSuccess,
+} from "@3flabs/guardian";
 import { hashTypedData, recoverTypedDataAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -426,6 +430,65 @@ describe("guardian coordinator", () => {
       failed: 1,
     });
     expect(calls).toHaveLength(1);
+  });
+
+  it("gives up on a request after its second sign deadline so it stops holding up the queue", async () => {
+    const { logger, errors } = recordingLogger();
+    // Intent ids: 1 = slow, 2 = flaky, 3 = fine, 4 = slow once (cold KMS client, slow RPC).
+    const row = (intentId: string) => ({
+      ...SIGNING_REQUEST,
+      id: `00000000-0000-4000-8000-00000000000${intentId}`,
+      body: { ...REQUEST_BODY, intent: { id: intentId } },
+    });
+    const rows = [row("1"), row("2"), row("3"), row("4")];
+    const signCalls: string[] = [];
+    const options = optionsFor({
+      timeouts: { signMs: 20 },
+      signIntentRequestBinding: async (ctx, body) => {
+        signCalls.push(body.intent.id);
+        if (
+          body.intent.id === "1" ||
+          (body.intent.id === "4" && signCalls.filter((id) => id === "4").length === 1)
+        ) {
+          // A role-events scan that cannot finish inside the budget.
+          await new Promise((resolve) => ctx.signal?.addEventListener("abort", resolve));
+        }
+        if (body.intent.id === "2") {
+          return Result.err(new UpstreamUnavailableError({ message: "rpc down", status: 503 }));
+        }
+        return Result.ok(SIGNING_SUCCESS);
+      },
+    });
+    options.logger = logger;
+    options.fetcher = async (input) =>
+      String(input).includes("/submission")
+        ? json({ status: "accepted", quorumReached: false, submissionCount: 1 })
+        : json({ total: rows.length, page: 1, pageSize: 100, items: rows });
+
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 4,
+      signed: 1,
+      skipped: 0,
+      failed: 3,
+    });
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 4,
+      signed: 2,
+      skipped: 0,
+      failed: 2,
+    });
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 4,
+      signed: 2,
+      skipped: 1,
+      failed: 1,
+    });
+    // One timeout is retried (4 signs on the next poll); two give up on the
+    // request (1 is not called again). A fast transient failure is retried.
+    expect(signCalls).toEqual(["1", "2", "3", "4", "1", "2", "3", "4", "2", "3", "4"]);
+    expect(errors.filter((message) => message.endsWith("not retrying it"))).toEqual([
+      `failed guardian signing request ${rows[0]!.id}: sign did not complete within 20ms; not retrying it`,
+    ]);
   });
 
   it("rejects coordinator metadata that does not match the signed body", async () => {
