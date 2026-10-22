@@ -1,6 +1,7 @@
 import {
   noopLogger,
   runSigning,
+  UpstreamUnavailableError,
   zIntentFundBindingBody,
   zIntentRequestBindingBody,
   zIntentSwapBody,
@@ -26,6 +27,20 @@ const TOKEN_INFO = {
   scopes: new Set(),
   requiresHmac: false,
 } satisfies TokenInfo;
+
+// The 503 runSigning raises when the signMs deadline fires
+// (withAbstractionDeadline in @3flabs/guardian).
+const SIGN_TIMEOUT = /^sign did not complete within \d+ms$/;
+
+/**
+ * Signing requests whose validate-and-sign hit the sign deadline, per
+ * guardian. The same checks hit the same deadline on every poll, holding
+ * every request behind them for a full budget each time, so the
+ * coordinator gives up on them for the life of the process. grunt-api has
+ * no rejection endpoint: the request stays unsigned until its deadline.
+ */
+// ponytail: never pruned; one UUID per timed-out request, prune against the open list if that grows.
+const timedOutRequests = new WeakMap<CoordinatorGuardian, Set<string>>();
 
 const zSigningKind = z.enum(["set_request", "set_fund", "swap", "request_whitelisting"]);
 
@@ -160,6 +175,8 @@ export async function runGuardianCoordinatorOnce(
 ): Promise<PollCycleStats> {
   const fetcher = options.fetcher ?? fetch;
   const logger = options.logger ?? console;
+  const timedOut = timedOutRequests.get(options.guardian) ?? new Set<string>();
+  timedOutRequests.set(options.guardian, timedOut);
 
   for (const filter of pollFilters(options)) {
     for (let page = 1; ; page++) {
@@ -190,7 +207,7 @@ export async function runGuardianCoordinatorOnce(
         }
         const request = row.data;
 
-        if (request.mySubmission !== null) {
+        if (request.mySubmission !== null || timedOut.has(request.id)) {
           stats.skipped++;
           continue;
         }
@@ -234,10 +251,11 @@ export async function runGuardianCoordinatorOnce(
           logger.log(`submitted guardian signature for ${request.id}`);
         } catch (error) {
           stats.failed++;
+          const message = error instanceof Error ? error.message : String(error);
+          const gaveUp = error instanceof UpstreamUnavailableError && SIGN_TIMEOUT.test(message);
+          if (gaveUp) timedOut.add(request.id);
           logger.error(
-            `failed guardian signing request ${request.id}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+            `failed guardian signing request ${request.id}: ${message}${gaveUp ? "; not retrying it" : ""}`,
           );
         }
       }
