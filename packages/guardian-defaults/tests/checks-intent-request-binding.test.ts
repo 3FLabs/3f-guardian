@@ -594,6 +594,46 @@ describe("buildIntentRequestBindingChecks", () => {
     expect(skip.getCodeBlocks).toEqual([]);
   });
 
+  it("does not cache a probe-only tooOld, so a later skip run on the same cache still scans for in-window rogue grants", async () => {
+    const cache = inMemoryCache(zA1OnChainData);
+    const stub = makeClient({
+      multicallResponses: [
+        [OWNER, true],
+        [OWNER, true],
+      ],
+      latestBlock: 10_000n,
+      getCode: () => "0x6080",
+      getLogs: ({ fromBlock, toBlock }) =>
+        fromBlock! <= 9_900n && toBlock! >= 9_900n
+          ? [
+              {
+                address: RC,
+                eventName: "RolesUpdated" as const,
+                blockNumber: 9_900n,
+                logIndex: 0,
+                args: { user: ROGUE, roles: ROLE_PULLER },
+              },
+            ]
+          : [],
+    });
+    const failRun = buildIntentRequestBindingChecks({
+      policy: { ...policy, onLookbackExhausted: "fail" },
+      cache,
+    });
+    expect((await failRun(ctx(stub.client), baseBody)).isErr()).toBe(true);
+    expect(stub.getLogsCalls).toBe(0);
+
+    const r = await buildIntentRequestBindingChecks({ policy, cache })(ctx(stub.client), baseBody);
+    expect(r.isErr()).toBe(true);
+    if (r.isErr()) {
+      const puller = (r.error as ValidationFailedError).checks.find((c) =>
+        c.description.includes("puller role"),
+      );
+      expect(puller?.passed).toBe(false);
+      expect(puller?.reason).toContain(ROGUE);
+    }
+  });
+
   it("replays a stale cached tooOld entry without partialHolders as skipped (legacy cache shape)", async () => {
     const stub = makeClient({}); // any on-chain read would throw "unexpected multicall"
     const cache = inMemoryCache(zA1OnChainData);

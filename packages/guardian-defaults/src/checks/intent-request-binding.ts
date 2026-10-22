@@ -175,7 +175,9 @@ export const DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS = 80 * 24 * 60 * 6
  *    role checks toward failure (an observed non-accepted holder),
  *    never toward a pass. The field is optional so stale cross-process
  *    cache entries written by older package versions still
- *    deserialise; absence is treated as an empty map. Without an
+ *    deserialise; absence is treated as an empty map. The
+ *    `onLookbackExhausted: "fail"` code probe also returns it absent
+ *    (nothing scanned), and such a result is never cached. Without an
  *    observed rogue holder the role checks follow the policy's
  *    `onLookbackExhausted` disposition on every replay until the cache
  *    expires.
@@ -423,7 +425,13 @@ export async function runA1(
     }
     onChain = fetched.value;
 
-    if (cache !== undefined) {
+    // A probe-only `tooOld` has no window scan behind it (empty
+    // `partialHolders`), so it is never written back: a later run under
+    // `skip` on the same cache must scan for in-window rogue grants.
+    if (
+      cache !== undefined &&
+      !(onChain.kind === "tooOld" && onChain.partialHolders === undefined)
+    ) {
       try {
         await cache.set(cacheKey, onChain, cacheTtlMs !== undefined ? { ttlMs: cacheTtlMs } : {});
       } catch (e) {
@@ -668,12 +676,9 @@ async function fetchA1OnChain(
         blockNumber: beforeWindow,
       });
       if (code !== undefined) {
-        return Result.ok({
-          kind: "tooOld",
-          factory: matchedFactories[0]!,
-          owner,
-          partialHolders: new Map(),
-        });
+        // No `partialHolders`: nothing was scanned, and runA1 does not
+        // cache an entry without them.
+        return Result.ok({ kind: "tooOld", factory: matchedFactories[0]!, owner });
       }
     } catch (e) {
       ctx.logger.warn(

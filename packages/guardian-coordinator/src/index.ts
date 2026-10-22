@@ -33,14 +33,17 @@ const TOKEN_INFO = {
 const SIGN_TIMEOUT = /^sign did not complete within \d+ms$/;
 
 /**
- * Signing requests whose validate-and-sign hit the sign deadline, per
- * guardian. The same checks hit the same deadline on every poll, holding
- * every request behind them for a full budget each time, so the
- * coordinator gives up on them for the life of the process. grunt-api has
- * no rejection endpoint: the request stays unsigned until its deadline.
+ * Sign-deadline hits per signing request, per guardian. A request that
+ * hits the deadline on every poll holds every request behind it for a
+ * full budget each time, so after {@link SIGN_TIMEOUTS_BEFORE_GIVING_UP}
+ * the coordinator gives up on it for the life of the process. One hit is
+ * retried on the next poll: a cold KMS client or one slow RPC call can
+ * outlast the budget once. grunt-api has no rejection endpoint: a request
+ * given up on stays unsigned until its deadline.
  */
 // ponytail: never pruned; one UUID per timed-out request, prune against the open list if that grows.
-const timedOutRequests = new WeakMap<CoordinatorGuardian, Set<string>>();
+const signTimeouts = new WeakMap<CoordinatorGuardian, Map<string, number>>();
+const SIGN_TIMEOUTS_BEFORE_GIVING_UP = 2;
 
 const zSigningKind = z.enum(["set_request", "set_fund", "swap", "request_whitelisting"]);
 
@@ -175,8 +178,8 @@ export async function runGuardianCoordinatorOnce(
 ): Promise<PollCycleStats> {
   const fetcher = options.fetcher ?? fetch;
   const logger = options.logger ?? console;
-  const timedOut = timedOutRequests.get(options.guardian) ?? new Set<string>();
-  timedOutRequests.set(options.guardian, timedOut);
+  const timeouts = signTimeouts.get(options.guardian) ?? new Map<string, number>();
+  signTimeouts.set(options.guardian, timeouts);
 
   for (const filter of pollFilters(options)) {
     for (let page = 1; ; page++) {
@@ -207,7 +210,10 @@ export async function runGuardianCoordinatorOnce(
         }
         const request = row.data;
 
-        if (request.mySubmission !== null || timedOut.has(request.id)) {
+        if (
+          request.mySubmission !== null ||
+          (timeouts.get(request.id) ?? 0) >= SIGN_TIMEOUTS_BEFORE_GIVING_UP
+        ) {
           stats.skipped++;
           continue;
         }
@@ -252,8 +258,12 @@ export async function runGuardianCoordinatorOnce(
         } catch (error) {
           stats.failed++;
           const message = error instanceof Error ? error.message : String(error);
-          const gaveUp = error instanceof UpstreamUnavailableError && SIGN_TIMEOUT.test(message);
-          if (gaveUp) timedOut.add(request.id);
+          let gaveUp = false;
+          if (error instanceof UpstreamUnavailableError && SIGN_TIMEOUT.test(message)) {
+            const hits = (timeouts.get(request.id) ?? 0) + 1;
+            timeouts.set(request.id, hits);
+            gaveUp = hits >= SIGN_TIMEOUTS_BEFORE_GIVING_UP;
+          }
           logger.error(
             `failed guardian signing request ${request.id}: ${message}${gaveUp ? "; not retrying it" : ""}`,
           );

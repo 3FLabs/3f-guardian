@@ -432,21 +432,24 @@ describe("guardian coordinator", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("gives up on a request that hits the sign deadline so it stops holding up the queue", async () => {
+  it("gives up on a request after its second sign deadline so it stops holding up the queue", async () => {
     const { logger, errors } = recordingLogger();
-    // Intent ids: 1 = slow, 2 = flaky, 3 = fine.
+    // Intent ids: 1 = slow, 2 = flaky, 3 = fine, 4 = slow once (cold KMS client, slow RPC).
     const row = (intentId: string) => ({
       ...SIGNING_REQUEST,
       id: `00000000-0000-4000-8000-00000000000${intentId}`,
       body: { ...REQUEST_BODY, intent: { id: intentId } },
     });
-    const rows = [row("1"), row("2"), row("3")];
+    const rows = [row("1"), row("2"), row("3"), row("4")];
     const signCalls: string[] = [];
     const options = optionsFor({
       timeouts: { signMs: 20 },
       signIntentRequestBinding: async (ctx, body) => {
         signCalls.push(body.intent.id);
-        if (body.intent.id === "1") {
+        if (
+          body.intent.id === "1" ||
+          (body.intent.id === "4" && signCalls.filter((id) => id === "4").length === 1)
+        ) {
           // A role-events scan that cannot finish inside the budget.
           await new Promise((resolve) => ctx.signal?.addEventListener("abort", resolve));
         }
@@ -463,19 +466,26 @@ describe("guardian coordinator", () => {
         : json({ total: rows.length, page: 1, pageSize: 100, items: rows });
 
     await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
-      fetched: 3,
+      fetched: 4,
       signed: 1,
+      skipped: 0,
+      failed: 3,
+    });
+    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+      fetched: 4,
+      signed: 2,
       skipped: 0,
       failed: 2,
     });
     await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
-      fetched: 3,
-      signed: 1,
+      fetched: 4,
+      signed: 2,
       skipped: 1,
       failed: 1,
     });
-    // The timed-out request ran once; a fast transient failure is retried.
-    expect(signCalls).toEqual(["1", "2", "3", "2", "3"]);
+    // One timeout is retried (4 signs on the next poll); two give up on the
+    // request (1 is not called again). A fast transient failure is retried.
+    expect(signCalls).toEqual(["1", "2", "3", "4", "1", "2", "3", "4", "2", "3", "4"]);
     expect(errors.filter((message) => message.endsWith("not retrying it"))).toEqual([
       `failed guardian signing request ${rows[0]!.id}: sign did not complete within 20ms; not retrying it`,
     ]);
