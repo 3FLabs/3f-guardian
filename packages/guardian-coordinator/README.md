@@ -97,10 +97,12 @@ Optional env:
   `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` — or `request_whitelisting` batches, which
   scan per request contract — need longer than the default. A signing request that hits
   this deadline is logged (`failed guardian signing request <id>: sign did not complete
-  within <n>ms; not retrying it`) and skipped for the life of the process: the same scan
-  would time out again and hold every request behind it for another budget. grunt-api has
-  no rejection endpoint, so the request stays unsigned until its deadline. Faster
-  failures (an RPC error, a 422) are retried on the next poll as before.
+  within <n>ms`) and retried on the next poll, so one slow RPC or KMS call doesn't drop
+  it. After its second sign deadline the line ends `; not retrying it` and the request is
+  skipped for the life of the process: the same scan would time out again and hold every
+  request behind it for another budget. grunt-api has no rejection endpoint, so the
+  request stays unsigned until its deadline. Faster failures (an RPC error, a 422) are
+  retried on the next poll as before.
 - `GUARDIAN_SWAP_PRICE_TOLERANCE_BPS` default `1`
 
 ## One process per chain
@@ -135,9 +137,10 @@ Ethereum endpoint, so 500 chunks take about 140–165 s. On a slow public node,
 window, so a public node may not fit the budget. For a window that size, budget
 300 s and size the provider for it. `request_whitelisting` scans its request
 contracts one after another inside the same budget, so a batch of contracts deployed
-early in the window can still time out. A timeout is a 503: nothing is signed, and that
-signing request is not retried by this process, so it costs the queue one budget, not
-one per poll. Size the heartbeat-absence alert to that worst-case cycle.
+early in the window can still time out. A timeout is a 503: nothing is signed. The
+request is retried once on the next poll, and after its second timeout this process
+stops retrying it, so a stuck request costs the queue two budgets, not one per poll.
+Size the heartbeat-absence alert to that worst-case cycle.
 
 ## Lifecycle and heartbeat lines
 
