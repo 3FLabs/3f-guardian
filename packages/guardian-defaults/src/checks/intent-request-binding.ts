@@ -127,7 +127,10 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
  *    as `skipped:true`, preserving availability for mature contracts;
  *    `"fail"` fails closed (422) — security-sensitive operators that
  *    would rather reject than sign without role-holder verification
- *    should opt into this.
+ *    should opt into this. Under `"fail"` one `eth_getCode` at the block
+ *    before the window decides "older than the window" up front, so such
+ *    a contract is rejected without scanning; that read needs an archive
+ *    RPC, and when it errors the scan runs as before.
  */
 export type IntentRequestBindingPolicy = {
   readonly maxDeadlineSecondsAhead: number;
@@ -172,7 +175,9 @@ export const DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS = 80 * 24 * 60 * 6
  *    role checks toward failure (an observed non-accepted holder),
  *    never toward a pass. The field is optional so stale cross-process
  *    cache entries written by older package versions still
- *    deserialise; absence is treated as an empty map. Without an
+ *    deserialise; absence is treated as an empty map. The
+ *    `onLookbackExhausted: "fail"` code probe also returns it absent
+ *    (nothing scanned), and such a result is never cached. Without an
  *    observed rogue holder the role checks follow the policy's
  *    `onLookbackExhausted` disposition on every replay until the cache
  *    expires.
@@ -305,6 +310,8 @@ export type A1Deps = {
  *   - "Too old" outcome → role checks fail (422) if a rogue grant was
  *     observed inside the scanned window, otherwise follow the
  *     policy's `onLookbackExhausted` disposition (default: skipped).
+ *   - Under `onLookbackExhausted: "fail"`, code at the block before the
+ *     window (archive `eth_getCode`) is "too old" without any scan.
  *
  * Stage 1 uses `allowFailure: true` so each slot is classified on its
  * own. A transport-level RPC failure (the aggregate3 call itself)
@@ -418,7 +425,13 @@ export async function runA1(
     }
     onChain = fetched.value;
 
-    if (cache !== undefined) {
+    // A probe-only `tooOld` has no window scan behind it (empty
+    // `partialHolders`), so it is never written back: a later run under
+    // `skip` on the same cache must scan for in-window rogue grants.
+    if (
+      cache !== undefined &&
+      !(onChain.kind === "tooOld" && onChain.partialHolders === undefined)
+    ) {
       try {
         await cache.set(cacheKey, onChain, cacheTtlMs !== undefined ? { ttlMs: cacheTtlMs } : {});
       } catch (e) {
@@ -645,6 +658,34 @@ async function fetchA1OnChain(
         status: 503,
       }),
     );
+  }
+
+  // Fail-closed fast path. Under `onLookbackExhausted: "fail"` a contract
+  // deployed before the window is rejected whatever the window holds, so
+  // the scan would walk every chunk only to reach that answer — long
+  // enough, on a slow provider, to outlast the sign budget and never
+  // answer at all. One archive `eth_getCode` at the block just before the
+  // window settles it: code there means the contract predates the window.
+  // The probe can only tighten the outcome. Empty code, or a node that
+  // cannot serve historical state, falls through to the scan unchanged.
+  if (policy.onLookbackExhausted === "fail" && latestBlock > policy.eventScanMaxLookbackBlocks) {
+    const beforeWindow = latestBlock - policy.eventScanMaxLookbackBlocks - 1n;
+    try {
+      const code = await ctx.client.getCode({
+        address: requestContract,
+        blockNumber: beforeWindow,
+      });
+      if (code !== undefined) {
+        // No `partialHolders`: nothing was scanned, and runA1 does not
+        // cache an entry without them.
+        return Result.ok({ kind: "tooOld", factory: matchedFactories[0]!, owner });
+      }
+    } catch (e) {
+      ctx.logger.warn(
+        { err: sanitizeErr(e), requestContract, blockNumber: beforeWindow.toString() },
+        "A.1: historical getCode failed (needs an archive RPC); falling back to the role-events scan",
+      );
+    }
   }
 
   let scanOutcome;
