@@ -148,3 +148,11 @@ packages/
 ## License
 
 MIT.
+
+### Independent whitelist nonces
+
+Coordinator requests without a body `nonce` use the signer’s own on-chain window. The coordinator reserves a nonce in grunt-api before signing and includes it in the submission. Retries and replicas reuse the durable reservation; all existing validation checks still run. Legacy requests containing `nonce` retain their existing signing format.
+
+When the entire candidate window is consumed, the coordinator verifies consumption at a finalized block and submits `setValidatorNonceFloor` from that validator. It never advances past an unconsumed nonce. A pending transaction postpones maintenance; receipt confirmation is followed by a fresh chain read on the next poll. Private-key, AWS KMS and GCP KMS signers support this transaction; remote HTTP signers currently require operator floor maintenance. Keep native gas in the validator account and configure `GUARDIAN_ACCEPTED_WHITELIST_BOOKS` explicitly. Do not share that signer with an uncoordinated whitelist-signing service.
+
+Deploy the API nonce-reservation migration and API first, this coordinator second, then the orchestrator that announces requests without `nonce`. No contract upgrade is needed. Existing pending requests remain valid; rollback must stop new independent requests before reverting the API/coordinator.

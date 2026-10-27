@@ -1,6 +1,17 @@
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { Result } from "better-result";
-import { hashTypedData, hexToBytes, recoverAddress, type Address, type Hex } from "viem";
+import {
+  hashTypedData,
+  hexToBytes,
+  recoverAddress,
+  keccak256,
+  parseSignature,
+  serializeTransaction,
+  type Address,
+  type Hex,
+  type LocalAccount,
+} from "viem";
+import { toAccount } from "viem/accounts";
 
 import { InternalError, UpstreamUnavailableError, type SignTypedData } from "@3flabs/guardian";
 
@@ -151,4 +162,49 @@ function gcpSignDigest(): GcpKmsDigestSigner {
 function bytesLikeToUint8Array(value: BytesLike): Uint8Array {
   if (value instanceof Uint8Array) return value;
   return Uint8Array.from(Buffer.from(value, "base64"));
+}
+
+export function gcpKmsAccount(args: {
+  keyVersionName: string;
+  guardianSigner: Address;
+  signDigest?: GcpKmsDigestSigner;
+}): LocalAccount {
+  const sign = args.signDigest ?? gcpSignDigest();
+  return kmsAccount(args.guardianSigner, (digest) =>
+    sign({ keyVersionName: args.keyVersionName, digest }),
+  );
+}
+
+export function awsKmsAccount(args: {
+  keyId: string;
+  guardianSigner: Address;
+  region?: string | undefined;
+  signDigest?: AwsKmsDigestSigner;
+}): LocalAccount {
+  const sign = args.signDigest ?? awsSignDigest(args);
+  return kmsAccount(args.guardianSigner, (digest) => sign({ keyId: args.keyId, digest }));
+}
+
+function kmsAccount(
+  guardianSigner: Address,
+  signDigest: (digest: Hex) => Promise<BytesLike>,
+): LocalAccount {
+  const sign = async (digest: Hex) =>
+    ethereumSignatureFromDer({
+      digest,
+      guardianSigner,
+      derSignature: bytesLikeToUint8Array(await signDigest(digest)),
+    });
+  return toAccount({
+    address: guardianSigner,
+    signMessage: async () => {
+      throw new Error("Guardian does not sign arbitrary messages");
+    },
+    signTypedData: async (data) => sign(hashTypedData(data)),
+    signTransaction: async (transaction) =>
+      serializeTransaction(
+        transaction,
+        parseSignature(await sign(keccak256(serializeTransaction(transaction)))),
+      ),
+  });
 }

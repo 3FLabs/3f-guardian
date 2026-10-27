@@ -62,6 +62,7 @@ export type CoordinatorGuardian = Pick<
   | "signIntentSwap"
 > & {
   signRequestWhitelisting?: GuardianAbstractions["signRequestWhitelisting"];
+  whitelistNonceCandidates?: (body: RequestWhitelistingBody) => Promise<string[]>;
 };
 
 export type CoordinatorConnectionConfig = {
@@ -239,6 +240,44 @@ export async function runGuardianCoordinatorOnce(
             continue;
           }
 
+          const independentNonce =
+            parsed.kind === "request_whitelisting" &&
+            !("nonce" in (request.body as Record<string, unknown>));
+          if (independentNonce && parsed.kind === "request_whitelisting") {
+            if (!options.guardian.whitelistNonceCandidates)
+              throw new Error("Independent whitelist nonces are not configured");
+            const candidates = await options.guardian.whitelistNonceCandidates(parsed.body);
+            if (!candidates.length) {
+              stats.skipped++;
+              continue;
+            }
+            const reserved = z
+              .object({
+                nonce: z.string().regex(/^(0|[1-9][0-9]{0,77})$/),
+                payloadHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+              })
+              .parse(
+                await requestJson(
+                  fetcher,
+                  "PUT",
+                  `${options.coordinatorBaseUrl}/v1/guardian/signing-requests/${request.id}/nonce`,
+                  {
+                    headers: {
+                      "content-type": "application/json",
+                      "x-api-key": options.coordinatorApiKey,
+                    },
+                    body: JSON.stringify({ candidates }),
+                  },
+                  options.requestTimeoutMs,
+                ),
+              );
+            if (!candidates.includes(reserved.nonce))
+              throw new Error(
+                "Reserved whitelist nonce is no longer available in this validator's window",
+              );
+            parsed.body.nonce = reserved.nonce;
+            request.payloadHash = reserved.payloadHash;
+          }
           const signed = await signWithGuardian(options.guardian, request, parsed);
           await requestJson(
             fetcher,
@@ -249,7 +288,13 @@ export async function runGuardianCoordinatorOnce(
                 "content-type": "application/json",
                 "x-api-key": options.coordinatorApiKey,
               },
-              body: JSON.stringify({ chainId: parsed.body.chainId, signature: signed.signature }),
+              body: JSON.stringify({
+                chainId: parsed.body.chainId,
+                signature: signed.signature,
+                ...(independentNonce && parsed.kind === "request_whitelisting"
+                  ? { nonce: parsed.body.nonce }
+                  : {}),
+              }),
             },
             options.requestTimeoutMs,
           );
@@ -336,7 +381,14 @@ function parseSigningBody(request: SigningRequest): ParsedSigningBody {
     case "swap":
       return { kind: request.kind, body: zIntentSwapBody.parse(request.body) };
     case "request_whitelisting":
-      return { kind: request.kind, body: zRequestWhitelistingBody.parse(request.body) };
+      return {
+        kind: request.kind,
+        body: zRequestWhitelistingBody.parse(
+          request.body !== null && typeof request.body === "object" && !("nonce" in request.body)
+            ? { ...request.body, nonce: "0" }
+            : request.body,
+        ),
+      };
   }
 }
 
