@@ -5,7 +5,14 @@ import {
   type RequestWhitelistingResponse,
   type SigningSuccess,
 } from "@3flabs/guardian";
-import { hashTypedData, recoverTypedDataAddress, type Hex } from "viem";
+import {
+  hashTypedData,
+  recoverTypedDataAddress,
+  recoverTransactionAddress,
+  parseTransaction,
+  type Hex,
+  type TransactionSerialized,
+} from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import {
@@ -19,7 +26,12 @@ import {
   fatalLine,
   startupLine,
 } from "../src/cli.js";
-import { awsKmsSignTypedData, gcpKmsSignTypedData } from "../src/kms-signers.js";
+import {
+  awsKmsSignTypedData,
+  gcpKmsSignTypedData,
+  awsKmsAccount,
+  gcpKmsAccount,
+} from "../src/kms-signers.js";
 
 const REQUEST_ID = "550e8400-e29b-41d4-a716-446655440000";
 const FACILITY = "0x2222222222222222222222222222222222222222";
@@ -161,95 +173,108 @@ describe("guardian coordinator", () => {
     expect(submitBodies).toEqual([{ chainId: 1, signature: SIGNATURE }]);
   });
 
-  it("maps each signing kind to the matching guardian function", async () => {
-    const seen: string[] = [];
-    const submitted: string[] = [];
-    const options = optionsFor({
-      signIntentRequestBinding: async () => {
-        seen.push("set_request");
-        return Result.ok(SIGNING_SUCCESS);
-      },
-      signIntentFundBinding: async () => {
-        seen.push("set_fund");
-        return Result.ok(SIGNING_SUCCESS);
-      },
-      signIntentSwap: async () => {
-        seen.push("swap");
-        return Result.ok(SIGNING_SUCCESS);
-      },
-      signRequestWhitelisting: async (_ctx, body) => {
-        seen.push("request_whitelisting");
-        expect(body).toEqual(REQUEST_WHITELISTING_BODY);
-        return Result.ok(REQUEST_WHITELISTING_SUCCESS);
-      },
-    });
-    options.fetcher = async (input) => {
-      const url = String(input);
-      if (url.startsWith("http://coordinator.test/v1/guardian/signing-requests?")) {
-        return json({
-          total: 4,
-          page: 1,
-          pageSize: 100,
-          items: [
-            SIGNING_REQUEST,
-            {
-              ...SIGNING_REQUEST,
-              id: "650e8400-e29b-41d4-a716-446655440000",
-              kind: "set_fund",
-              body: {
-                chainId: 1,
-                facility: FACILITY,
-                intent: { id: "7" },
-                fundContract: "0x4444444444444444444444444444444444444444",
-                positionManager: "0x5555555555555555555555555555555555555555",
-                deadline: 1_800_000_000,
+  it.each([false, true])(
+    "maps each signing kind with independent nonces=%s",
+    async (independent) => {
+      const seen: string[] = [];
+      const submitted: string[] = [];
+      const options = optionsFor({
+        signIntentRequestBinding: async () => {
+          seen.push("set_request");
+          return Result.ok(SIGNING_SUCCESS);
+        },
+        signIntentFundBinding: async () => {
+          seen.push("set_fund");
+          return Result.ok(SIGNING_SUCCESS);
+        },
+        signIntentSwap: async () => {
+          seen.push("swap");
+          return Result.ok(SIGNING_SUCCESS);
+        },
+        signRequestWhitelisting: async (_ctx, body) => {
+          seen.push("request_whitelisting");
+          expect(body).toEqual({ ...REQUEST_WHITELISTING_BODY, nonce: independent ? "19" : "0" });
+          return Result.ok({
+            ...REQUEST_WHITELISTING_SUCCESS,
+            nonce: independent ? "19" : "0",
+            payloadHash: independent ? OTHER_HASH : HASH,
+          });
+        },
+      });
+      Object.assign(options.guardian, { whitelistNonceCandidates: async () => ["17", "19"] });
+      options.fetcher = async (input) => {
+        const url = String(input);
+        if (url.startsWith("http://coordinator.test/v1/guardian/signing-requests?")) {
+          return json({
+            total: 4,
+            page: 1,
+            pageSize: 100,
+            items: [
+              SIGNING_REQUEST,
+              {
+                ...SIGNING_REQUEST,
+                id: "650e8400-e29b-41d4-a716-446655440000",
+                kind: "set_fund",
+                body: {
+                  chainId: 1,
+                  facility: FACILITY,
+                  intent: { id: "7" },
+                  fundContract: "0x4444444444444444444444444444444444444444",
+                  positionManager: "0x5555555555555555555555555555555555555555",
+                  deadline: 1_800_000_000,
+                },
               },
-            },
-            {
-              ...SIGNING_REQUEST,
-              id: "750e8400-e29b-41d4-a716-446655440000",
-              kind: "swap",
-              body: {
-                chainId: 1,
-                facility: FACILITY,
-                legs: [
-                  {
-                    intent: { id: "7" },
-                    asset: "0x6666666666666666666666666666666666666666",
-                    amount: "1",
-                  },
-                  {
-                    intent: { id: "8" },
-                    asset: "0x7777777777777777777777777777777777777777",
-                    amount: "2",
-                  },
-                ],
-                deadline: 1_800_000_000,
+              {
+                ...SIGNING_REQUEST,
+                id: "750e8400-e29b-41d4-a716-446655440000",
+                kind: "swap",
+                body: {
+                  chainId: 1,
+                  facility: FACILITY,
+                  legs: [
+                    {
+                      intent: { id: "7" },
+                      asset: "0x6666666666666666666666666666666666666666",
+                      amount: "1",
+                    },
+                    {
+                      intent: { id: "8" },
+                      asset: "0x7777777777777777777777777777777777777777",
+                      amount: "2",
+                    },
+                  ],
+                  deadline: 1_800_000_000,
+                },
               },
-            },
-            {
-              ...SIGNING_REQUEST,
-              id: "850e8400-e29b-41d4-a716-446655440000",
-              kind: "request_whitelisting",
-              facility: WHITELIST_BOOK,
-              body: REQUEST_WHITELISTING_BODY,
-            },
-          ],
-        });
-      }
-      submitted.push(url);
-      return json({ status: "accepted", quorumReached: true, submissionCount: 1 });
-    };
+              {
+                ...SIGNING_REQUEST,
+                id: "850e8400-e29b-41d4-a716-446655440000",
+                kind: "request_whitelisting",
+                facility: WHITELIST_BOOK,
+                body: independent
+                  ? Object.fromEntries(
+                      Object.entries(REQUEST_WHITELISTING_BODY).filter(([key]) => key !== "nonce"),
+                    )
+                  : REQUEST_WHITELISTING_BODY,
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/nonce")) return json({ nonce: "19", payloadHash: OTHER_HASH });
+        submitted.push(url);
+        return json({ status: "accepted", quorumReached: true, submissionCount: 1 });
+      };
 
-    await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
-      fetched: 4,
-      signed: 4,
-      skipped: 0,
-      failed: 0,
-    });
-    expect(seen).toEqual(["set_request", "set_fund", "swap", "request_whitelisting"]);
-    expect(submitted).toHaveLength(4);
-  });
+      await expect(runGuardianCoordinatorOnce(options)).resolves.toEqual({
+        fetched: 4,
+        signed: 4,
+        skipped: 0,
+        failed: 0,
+      });
+      expect(seen).toEqual(["set_request", "set_fund", "swap", "request_whitelisting"]);
+      expect(submitted).toHaveLength(4);
+    },
+  );
 
   it("reports request whitelisting rows when the optional signer is unavailable", async () => {
     const { logger, errors } = recordingLogger();
@@ -760,6 +785,28 @@ describe("guardian coordinator", () => {
     await expect(recoverTypedDataAddress({ ...TYPED_DATA, signature: result.value })).resolves.toBe(
       KMS_ACCOUNT.address,
     );
+    const transaction = {
+      chainId: 1,
+      nonce: 3,
+      gas: 50_000n,
+      maxFeePerGas: 2n,
+      maxPriorityFeePerGas: 1n,
+      to: WHITELIST_BOOK,
+      data: "0x1234",
+      type: "eip1559",
+    } as const;
+    const signDigest = async ({ digest }: { digest: Hex }) =>
+      derFromTypedDataSignature({ highS: true, digest });
+    for (const account of [
+      gcpKmsAccount({ keyVersionName: "test", guardianSigner: KMS_ACCOUNT.address, signDigest }),
+      awsKmsAccount({ keyId: "test", guardianSigner: KMS_ACCOUNT.address, signDigest }),
+    ]) {
+      const serialized = (await account.signTransaction(transaction)) as TransactionSerialized;
+      expect(parseTransaction(serialized)).toMatchObject(transaction);
+      await expect(recoverTransactionAddress({ serializedTransaction: serialized })).resolves.toBe(
+        KMS_ACCOUNT.address,
+      );
+    }
   });
 
   it("rejects checksum-invalid allowlist addresses", () => {
@@ -946,8 +993,12 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-async function derFromTypedDataSignature(options: { highS?: boolean } = {}): Promise<Uint8Array> {
-  const signature = await KMS_ACCOUNT.signTypedData(TYPED_DATA);
+async function derFromTypedDataSignature(
+  options: { highS?: boolean; digest?: Hex } = {},
+): Promise<Uint8Array> {
+  const signature = options.digest
+    ? await KMS_ACCOUNT.sign({ hash: options.digest })
+    : await KMS_ACCOUNT.signTypedData(TYPED_DATA);
   const r = BigInt(`0x${signature.slice(2, 66)}`);
   const rawS = BigInt(`0x${signature.slice(66, 130)}`);
   const s = options.highS ? SECP256K1_N - rawS : rawS;

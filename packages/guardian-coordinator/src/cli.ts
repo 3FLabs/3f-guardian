@@ -13,6 +13,7 @@ import {
   type Address,
   type Hex,
   type PublicClient,
+  type LocalAccount,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -42,7 +43,14 @@ import {
   runGuardianCoordinator,
   type CoordinatorGuardian,
 } from "./index.js";
-import { awsKmsSignTypedData, gcpKmsSignTypedData } from "./kms-signers.js";
+import {
+  awsKmsSignTypedData,
+  gcpKmsSignTypedData,
+  awsKmsAccount,
+  gcpKmsAccount,
+} from "./kms-signers.js";
+
+import { makeWhitelistNonceCandidates } from "./whitelist-nonces.js";
 
 const DEFAULT_MAX_DEADLINE_SECONDS_AHEAD = 600;
 const DEFAULT_EVENT_SCAN_BLOCK_RANGE = 10_000n;
@@ -152,6 +160,16 @@ export function buildGuardianFromEnv(
           );
     },
     signTypedData: signer.signTypedData,
+    whitelistNonceCandidates: makeWhitelistNonceCandidates({
+      clients,
+      guardianSigner: signer.guardianSigner,
+      account: signer.account,
+      acceptedBooks: acceptedWhitelistBooks,
+      maxNonceAboveFloor: nonNegativeBigInt(
+        env.GUARDIAN_MAX_NONCE_ABOVE_FLOOR,
+        DEFAULT_MAX_NONCE_ABOVE_FLOOR,
+      ),
+    }),
     signIntentRequestBinding: makeSignIntentRequestBinding({
       checks: buildIntentRequestBindingChecks({ policy: requestBindingPolicy }),
       guardianSigner: signer.guardianSigner,
@@ -212,6 +230,7 @@ export function buildGuardianFromEnv(
 type LoadedGuardianSigner = {
   guardianSigner: Address;
   signTypedData: SignTypedData;
+  account?: LocalAccount;
 };
 
 function loadGuardianSigner(env: Record<string, string | undefined>): LoadedGuardianSigner {
@@ -221,6 +240,7 @@ function loadGuardianSigner(env: Record<string, string | undefined>): LoadedGuar
       const privateKey = required(env, "GUARDIAN_SIGNER_KEY") as Hex;
       return {
         guardianSigner: privateKeyToAccount(privateKey).address,
+        account: privateKeyToAccount(privateKey),
         signTypedData: privateKeyToSignTypedData(privateKey),
       };
     }
@@ -243,6 +263,11 @@ function loadGuardianSigner(env: Record<string, string | undefined>): LoadedGuar
       const guardianSigner = requiredAddress(env, "GUARDIAN_SIGNER_ADDRESS");
       return {
         guardianSigner,
+        account: awsKmsAccount({
+          keyId: required(env, "GUARDIAN_AWS_KMS_KEY_ID"),
+          guardianSigner,
+          region: env.AWS_REGION?.trim() || env.AWS_DEFAULT_REGION?.trim() || undefined,
+        }),
         signTypedData: awsKmsSignTypedData({
           keyId: required(env, "GUARDIAN_AWS_KMS_KEY_ID"),
           guardianSigner,
@@ -254,6 +279,10 @@ function loadGuardianSigner(env: Record<string, string | undefined>): LoadedGuar
       const guardianSigner = requiredAddress(env, "GUARDIAN_SIGNER_ADDRESS");
       return {
         guardianSigner,
+        account: gcpKmsAccount({
+          keyVersionName: required(env, "GUARDIAN_GCP_KMS_KEY_VERSION"),
+          guardianSigner,
+        }),
         signTypedData: gcpKmsSignTypedData({
           keyVersionName: required(env, "GUARDIAN_GCP_KMS_KEY_VERSION"),
           guardianSigner,
