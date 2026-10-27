@@ -44,6 +44,7 @@ type RpcError = { code: number; message: string };
 let rpc: {
   ownerReturnData: Hex;
   code: Hex | RpcError;
+  codeAt?: (block: bigint) => Hex;
   logs: unknown[];
   calls: Array<{ method: string; params: unknown[] }>;
 };
@@ -83,9 +84,17 @@ function answer(method: string, params: unknown[]): { result: unknown } | { erro
     case "eth_blockNumber":
       return { result: numberToHex(HEAD) };
     case "eth_getCode":
+      if (rpc.codeAt) return { result: rpc.codeAt(BigInt(String(params[1]))) };
       return typeof rpc.code === "string" ? { result: rpc.code } : { error: rpc.code };
-    case "eth_getLogs":
-      return { result: rpc.logs };
+    case "eth_getLogs": {
+      const range = params[0] as { fromBlock: string; toBlock: string };
+      return {
+        result: rpc.logs.filter((entry) => {
+          const block = BigInt((entry as { blockNumber: string }).blockNumber);
+          return block >= BigInt(range.fromBlock) && block <= BigInt(range.toBlock);
+        }),
+      };
+    }
     default:
       return { error: { code: -32601, message: `unexpected ${method}` } };
   }
@@ -152,12 +161,12 @@ function count(method: string): number {
 }
 
 /** Raw JSON-RPC log at a block inside the window. */
-function log(address: string, topics: Hex[], data: Hex, logIndex: number) {
+function log(address: string, topics: Hex[], data: Hex, logIndex: number, block = 4_995_000n) {
   return {
     address,
     topics,
     data,
-    blockNumber: numberToHex(4_995_000n),
+    blockNumber: numberToHex(block),
     blockHash: `0x${"ab".repeat(32)}`,
     transactionHash: `0x${"cd".repeat(32)}`,
     transactionIndex: "0x0",
@@ -166,7 +175,7 @@ function log(address: string, topics: Hex[], data: Hex, logIndex: number) {
   };
 }
 
-function rolesUpdated(user: Address, roles: bigint, logIndex: number) {
+function rolesUpdated(user: Address, roles: bigint, logIndex: number, block = 4_995_000n) {
   return log(
     REQUEST_CONTRACT,
     encodeEventTopics({
@@ -176,6 +185,7 @@ function rolesUpdated(user: Address, roles: bigint, logIndex: number) {
     }) as Hex[],
     "0x",
     logIndex,
+    block,
   );
 }
 
@@ -283,6 +293,66 @@ describe("creation lookup under fail", () => {
     });
     expect(count("eth_getCode")).toBe(0);
     expect(count("eth_getLogs")).toBe(0);
+  });
+});
+
+describe("GUARDIAN_EVENT_SCAN_FROM_BLOCK", () => {
+  it("replays an old contract from the fixed start and still rejects rogue or missing history", async () => {
+    const deployment = HEAD - LOOKBACK - 5_000n;
+    const start = deployment - 1n;
+    rpc.codeAt = (block) => (block < deployment ? "0x" : "0x6080");
+    const creation = log(
+      FACTORY,
+      encodeEventTopics({ abi: requestFactoryAbi, eventName: "RequestCreated" }) as Hex[],
+      encodeAbiParameters(parseAbiParameters("address, address, address, address"), [
+        REQUEST_CONTRACT,
+        FACTORY,
+        FACTORY,
+        FACTORY,
+      ]),
+      0,
+      deployment,
+    );
+    rpc.logs = [
+      creation,
+      rolesUpdated(PULLER, 1n, 1, deployment),
+      rolesUpdated(CONSUMER, 2n, 2, deployment),
+    ];
+    const environment = env({ GUARDIAN_EVENT_SCAN_FROM_BLOCK: `${CHAIN_ID}=${start}` });
+
+    const signed = await signRequestBinding(environment);
+    expect(signed.checks).toEqual(
+      expect.arrayContaining([
+        { description: PULLER_CHECK, passed: true, skipped: false },
+        { description: CONSUMER_CHECK, passed: true, skipped: false },
+      ]),
+    );
+    rpc.logs.push(rolesUpdated("0x000000000000000000000000000000000000dead", 1n, 3, HEAD - 1n));
+    await expect(signRequestBinding(environment)).rejects.toMatchObject({
+      checks: expect.arrayContaining([
+        expect.objectContaining({ description: PULLER_CHECK, passed: false }),
+      ]),
+    });
+    rpc.logs = rpc.logs.slice(1, 3);
+    await expect(signRequestBinding(environment)).rejects.toMatchObject(rejectedAsTooOld);
+    await expect(
+      signRequestBinding(env({ GUARDIAN_EVENT_SCAN_FROM_BLOCK: `1=${start}` })),
+    ).rejects.toMatchObject(rejectedAsTooOld);
+  });
+
+  it("rejects malformed starts and a start ahead of the chain head", async () => {
+    for (const value of [
+      "-1=0",
+      `${CHAIN_ID}=-1`,
+      `${CHAIN_ID}=1.5`,
+      `${CHAIN_ID}=1=2`,
+      `${CHAIN_ID}=1;${CHAIN_ID}=2`,
+    ]) {
+      expect(() => buildGuardianFromEnv(env({ GUARDIAN_EVENT_SCAN_FROM_BLOCK: value }))).toThrow();
+    }
+    await expect(
+      signRequestBinding(env({ GUARDIAN_EVENT_SCAN_FROM_BLOCK: `${CHAIN_ID}=${HEAD + 1n}` })),
+    ).rejects.toMatchObject({ status: 503 });
   });
 });
 

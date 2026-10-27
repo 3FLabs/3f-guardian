@@ -145,6 +145,8 @@ export type IntentRequestBindingPolicy = {
   readonly acceptedConsumers: ReadonlyMap<number, ReadonlySet<string>>;
   readonly eventScanBlockRange: bigint;
   readonly eventScanMaxLookbackBlocks: bigint;
+  /** Absolute inclusive history floor per chain; overrides the rolling lookback when set. */
+  readonly eventScanFromBlock?: ReadonlyMap<number, bigint>;
   readonly eventScanDeadlineMs?: number;
   readonly onLookbackExhausted?: "skip" | "fail";
 };
@@ -660,6 +662,21 @@ async function fetchA1OnChain(
     );
   }
 
+  const fromBlock = policy.eventScanFromBlock?.get(chainId);
+  if (fromBlock !== undefined && (fromBlock < 0n || fromBlock > latestBlock)) {
+    return Result.err(
+      new UpstreamUnavailableError({
+        message: "role-history start is outside current chain bounds",
+        status: 503,
+      }),
+    );
+  }
+  const earliestAllowed =
+    fromBlock ??
+    (latestBlock > policy.eventScanMaxLookbackBlocks
+      ? latestBlock - policy.eventScanMaxLookbackBlocks
+      : 0n);
+
   // Fail-closed fast path. Under `onLookbackExhausted: "fail"` a contract
   // deployed before the window is rejected whatever the window holds, so
   // the scan would walk every chunk only to reach that answer — long
@@ -668,8 +685,8 @@ async function fetchA1OnChain(
   // window settles it: code there means the contract predates the window.
   // The probe can only tighten the outcome. Empty code, or a node that
   // cannot serve historical state, falls through to the scan unchanged.
-  if (policy.onLookbackExhausted === "fail" && latestBlock > policy.eventScanMaxLookbackBlocks) {
-    const beforeWindow = latestBlock - policy.eventScanMaxLookbackBlocks - 1n;
+  if (policy.onLookbackExhausted === "fail" && earliestAllowed > 0n) {
+    const beforeWindow = earliestAllowed - 1n;
     try {
       const code = await ctx.client.getCode({
         address: requestContract,
@@ -697,6 +714,7 @@ async function fetchA1OnChain(
       latestBlock,
       blockRange: policy.eventScanBlockRange,
       maxLookbackBlocks: policy.eventScanMaxLookbackBlocks,
+      fromBlock,
       deadlineMs: policy.eventScanDeadlineMs,
       // Abort at the next chunk boundary once the shell's signMs
       // deadline has expired — the caller already got a 503, so the

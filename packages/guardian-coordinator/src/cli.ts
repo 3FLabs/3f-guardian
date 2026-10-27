@@ -124,6 +124,7 @@ export function buildGuardianFromEnv(
       env.GUARDIAN_EVENT_SCAN_BLOCK_RANGE,
       DEFAULT_EVENT_SCAN_BLOCK_RANGE,
     ),
+    eventScanFromBlock: parseBlockMap(env.GUARDIAN_EVENT_SCAN_FROM_BLOCK),
     eventScanMaxLookbackBlocks: positiveBigInt(
       env.GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
       DEFAULT_EVENT_SCAN_MAX_LOOKBACK_BLOCKS,
@@ -495,6 +496,22 @@ function parseAddressMap(value: string, name: string): Map<number, Set<string>> 
     map.set(chainId, addresses);
   }
   if (map.size === 0) throw new Error(`${name} must not be empty`);
+  return map;
+}
+
+function parseBlockMap(value: string | undefined): Map<number, bigint> | undefined {
+  if (!value?.trim()) return undefined;
+  const map = new Map<number, bigint>();
+  for (const item of value.split(";")) {
+    const match = /^([1-9]\d*)=(0|[1-9]\d*)$/.exec(item.trim());
+    const chainId = Number(match?.[1]);
+    if (!match || !Number.isSafeInteger(chainId) || map.has(chainId)) {
+      throw new Error(
+        "GUARDIAN_EVENT_SCAN_FROM_BLOCK requires unique chainId=nonnegativeBlock entries",
+      );
+    }
+    map.set(chainId, BigInt(match[2]!));
+  }
   return map;
 }
 

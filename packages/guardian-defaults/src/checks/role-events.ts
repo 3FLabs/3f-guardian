@@ -16,7 +16,8 @@ const flashLoanRequestCreatedEvent = morphoFlashLoanRequestFactoryAbi.find(
  * pair.
  *
  *  - `resolved` — we walked back far enough to observe the
- *    factory deployment event for this request (or hit `fromBlock = 0`).
+ *    factory deployment event for this request (or reached genesis
+ *    under the legacy rolling lookback).
  *    `holders` is the replayed final state: every address with at least
  *    one role bit set (zero-roles entries are pruned).
  *
@@ -61,8 +62,8 @@ type ChunkLog = {
  * Walks the chain backwards in chunks of `blockRange` blocks, gathering
  * `RolesUpdated` events on `requestContract` and supported deployment
  * events on any of `factories`. Stops as soon as the deployment event
- * for this `requestContract` is observed, or when `maxLookbackBlocks`
- * worth of history has been scanned (whichever comes first).
+ * for this `requestContract` is observed, or the inclusive `fromBlock`
+ * floor is reached. Without a floor, `maxLookbackBlocks` limits history.
  *
  * `factories` is every accepted factory whose `isRequest()` claimed the
  * contract — usually one, but during a factory migration (or with a
@@ -106,6 +107,7 @@ export async function scanRoleHolders(args: {
   readonly latestBlock: bigint;
   readonly blockRange: bigint;
   readonly maxLookbackBlocks: bigint;
+  readonly fromBlock?: bigint;
   readonly deadlineMs?: number;
   readonly signal?: AbortSignal;
   readonly now?: () => number;
@@ -120,7 +122,11 @@ export async function scanRoleHolders(args: {
     throw new Error(`deadlineMs must be a non-negative finite number, got ${args.deadlineMs}`);
   }
 
-  const earliestAllowed = latestBlock > maxLookbackBlocks ? latestBlock - maxLookbackBlocks : 0n;
+  if (args.fromBlock !== undefined && (args.fromBlock < 0n || args.fromBlock > latestBlock)) {
+    throw new Error("fromBlock must be within the current chain history");
+  }
+  const earliestAllowed =
+    args.fromBlock ?? (latestBlock > maxLookbackBlocks ? latestBlock - maxLookbackBlocks : 0n);
 
   const requestContractLower = requestContract.toLowerCase();
   const factoryByLower = new Map(factories.map((f) => [f.toLowerCase(), f]));
@@ -203,7 +209,10 @@ export async function scanRoleHolders(args: {
     toBlock = fromBlock - 1n;
   }
 
-  if (foundDeploymentBlock === undefined && earliestAllowed > 0n) {
+  if (
+    foundDeploymentBlock === undefined &&
+    (earliestAllowed > 0n || args.fromBlock !== undefined)
+  ) {
     // We ran out of lookback budget without observing the deployment
     // event. The contract pre-existed the scan window — the caller MUST
     // NOT treat the role-holder map as complete (the initial role

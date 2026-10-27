@@ -56,6 +56,12 @@ Optional env:
 - `GUARDIAN_MAX_DEADLINE_SECONDS_AHEAD` default `600`
 - `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` default `10000`
 - `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` default `1000000`
+- `GUARDIAN_EVENT_SCAN_FROM_BLOCK` optional `chainId=block;chainId=block` with
+  nonnegative decimal blocks. Overrides the rolling lookback for listed chains with
+  an inclusive history floor. Set it at or before the earliest accepted factory's
+  deployment; the scan must still find the request's factory deployment event and
+  replay all later role changes. Duplicate chains, invalid blocks, and starts ahead
+  of the current head are rejected. Unlisted chains keep the rolling lookback.
 - `GUARDIAN_ON_LOOKBACK_EXHAUSTED` `fail` (the default when unset) or `skip`. What the
   puller / consumer / executor role checks do when a request contract was deployed
   before the lookback window, so its role holders cannot be fully replayed: `fail`
@@ -121,6 +127,7 @@ deep scan on one chain must not hold up another's. For each chain:
 | `GUARDIAN_REQUEST_FACTORIES`, `GUARDIAN_REQUEST_OWNERS`, `GUARDIAN_REQUEST_PULLERS`, `GUARDIAN_REQUEST_CONSUMERS`, `GUARDIAN_ACCEPTED_FUNDS`, `GUARDIAN_FUND_OWNERS`, `GUARDIAN_PM_FACTORIES`, `GUARDIAN_PM_OWNERS` (and the optional flash-loan / whitelist-book / retargetter sets) | `<chainId>=<addresses>` | That chain's deployments and signer addresses; nothing carries over between chains. |
 | `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` | `10000`, or the provider's `eth_getLogs` cap if lower | |
 | `GUARDIAN_EVENT_SCAN_MAX_LOOKBACK_BLOCKS` | the longest request lifetime, in that chain's blocks | The default 1,000,000 is about 139 days at 12 s blocks; a chain with shorter blocks needs proportionally more. |
+| `GUARDIAN_EVENT_SCAN_FROM_BLOCK` | optionally `<chainId>=<factory deployment block>` | Keeps mature request contracts inside the scan history; the full replay cost grows with chain age. |
 | `GUARDIAN_ON_LOOKBACK_EXHAUSTED` | unset (`fail`) | Reject rather than sign for a contract whose role holders could not be replayed. Setting `fail` explicitly is equivalent. |
 | `GUARDIAN_SIGN_TIMEOUT_MS` | enough for the worst-case scan; see below | |
 | `GUARDIAN_SIGNER_PROVIDER`, `GUARDIAN_SIGNER_ADDRESS`, signer key settings | the guardian's key for that chain | |
@@ -141,6 +148,11 @@ early in the window can still time out. A timeout is a 503: nothing is signed. T
 request is retried once on the next poll, and after its second timeout this process
 stops retrying it, so a stuck request costs the queue two budgets, not one per poll.
 Size the heartbeat-absence alert to that worst-case cycle.
+
+With an absolute history floor, measure the oldest accepted request's full replay
+against the provider's range cap and the signing budget before activation. Recheck
+capacity as history grows: this option has no incremental cache, and a fixed timeout
+still fails closed when the scan outgrows it.
 
 ## Lifecycle and heartbeat lines
 
