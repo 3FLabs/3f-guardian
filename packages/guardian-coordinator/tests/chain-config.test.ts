@@ -287,7 +287,7 @@ describe("creation lookup under fail", () => {
 });
 
 describe("per-chain coordinator base URL", () => {
-  it("keeps a /v2/chains/<id> prefix ahead of the /v1 paths", async () => {
+  it("uses a /v2/chains/<id> prefix in place of /v1", async () => {
     const config = loadCoordinatorConfig({
       COORDINATOR_BASE_URL: "https://coordinator.example/v2/chains/31337/",
       COORDINATOR_API_KEY: "key",
@@ -303,7 +303,7 @@ describe("per-chain coordinator base URL", () => {
       },
     });
     expect(urls).toEqual([
-      "https://coordinator.example/v2/chains/31337/v1/guardian/signing-requests?status=open&page=1&pageSize=100&chainId=31337",
+      "https://coordinator.example/v2/chains/31337/guardian/signing-requests?status=open&page=1&pageSize=100&chainId=31337",
     ]);
   });
 });

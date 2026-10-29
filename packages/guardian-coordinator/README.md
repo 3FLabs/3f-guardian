@@ -114,7 +114,7 @@ deep scan on one chain must not hold up another's. For each chain:
 
 | Variable | Value | Why |
 |---|---|---|
-| `COORDINATOR_BASE_URL` | `https://<coordinator host>/v2/chains/<chainId>` | That chain's coordinator. The path prefix is kept, so polls go to `…/v2/chains/<chainId>/v1/guardian/signing-requests`. |
+| `COORDINATOR_BASE_URL` | `https://<coordinator host>/v2/chains/<chainId>` | That chain's coordinator. The path prefix stands in for `/v1`, so polls go to `…/v2/chains/<chainId>/guardian/signing-requests`. A bare host keeps `/v1`. |
 | `COORDINATOR_API_KEY` | the key issued by that chain's coordinator | Keys live in each chain's database; one chain's key is not valid on another. |
 | `CHAIN_IDS` | `<chainId>` | |
 | `GUARDIAN_CHAIN_RPC_URLS` | `<chainId>=<archive RPC>` | Must answer `eth_getLogs` over `GUARDIAN_EVENT_SCAN_BLOCK_RANGE` blocks completely, and `eth_getCode` at historical blocks (archive) so old request contracts are rejected without a scan. |

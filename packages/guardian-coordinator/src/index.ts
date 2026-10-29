@@ -184,7 +184,7 @@ export async function runGuardianCoordinatorOnce(
 
   for (const filter of pollFilters(options)) {
     for (let page = 1; ; page++) {
-      const url = new URL(`${options.coordinatorBaseUrl}/v1/guardian/signing-requests`);
+      const url = new URL(`${apiRoot(options.coordinatorBaseUrl)}/guardian/signing-requests`);
       url.searchParams.set("status", "open");
       url.searchParams.set("page", String(page));
       url.searchParams.set("pageSize", String(options.pageSize));
@@ -260,7 +260,7 @@ export async function runGuardianCoordinatorOnce(
                 await requestJson(
                   fetcher,
                   "PUT",
-                  `${options.coordinatorBaseUrl}/v1/guardian/signing-requests/${request.id}/nonce`,
+                  `${apiRoot(options.coordinatorBaseUrl)}/guardian/signing-requests/${request.id}/nonce`,
                   {
                     headers: {
                       "content-type": "application/json",
@@ -282,7 +282,7 @@ export async function runGuardianCoordinatorOnce(
           await requestJson(
             fetcher,
             "PUT",
-            `${options.coordinatorBaseUrl}/v1/guardian/signing-requests/${request.id}/submission`,
+            `${apiRoot(options.coordinatorBaseUrl)}/guardian/signing-requests/${request.id}/submission`,
             {
               headers: {
                 "content-type": "application/json",
@@ -431,6 +431,14 @@ export function required(env: Record<string, string | undefined>, key: string): 
   const value = env[key]?.trim();
   if (!value) throw new Error(`${key} is required`);
   return value;
+}
+
+// A bare host is the legacy root, whose API lives under /v1; a base URL with a path is a gateway
+// route prefix such as /v2/chains/<id>, which the gateway rewrites to /v1.
+function apiRoot(coordinatorBaseUrl: string): string {
+  return new URL(coordinatorBaseUrl).pathname === "/"
+    ? `${coordinatorBaseUrl}/v1`
+    : coordinatorBaseUrl;
 }
 
 function baseUrl(value: string): string {
