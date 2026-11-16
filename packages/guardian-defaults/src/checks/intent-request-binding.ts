@@ -1,5 +1,5 @@
 import { Result } from "better-result";
-import { isAddress, type Address } from "viem";
+import { erc20Abi, isAddress, type Address } from "viem";
 import { z } from "zod";
 
 import {
@@ -12,7 +12,11 @@ import {
 import type { StandardSchemaV1 } from "../cache/standard-schema.js";
 import type { AsyncCache } from "../cache/types.js";
 import { requestAbi, ROLE_CONSUMER, ROLE_PULLER } from "../abi/request.js";
-import { morphoFlashLoanRequestFactoryAbi, requestFactoryAbi } from "../abi/request-factory.js";
+import {
+  morphoFlashLoanRequestAbi,
+  morphoFlashLoanRequestFactoryAbi,
+  requestFactoryAbi,
+} from "../abi/request-factory.js";
 import { retargetterAbi } from "../abi/retargetter.js";
 import {
   checkDeadline,
@@ -37,7 +41,12 @@ import type { CheckRunner, CheckRunnerError } from "./types.js";
  *    accepted factory's `isRequest(addr)` returns `true`.
  *
  *  - `acceptedFlashLoanRequestFactories` — Morpho flash-loan request
- *    factories, checked with `isFlashLoanRequest(addr)`.
+ *    factories, checked with `isFlashLoanRequest(addr)`. A request
+ *    contract matched by one of them MUST also hold a zero balance of
+ *    its `asset()` at bind time: outside a flash loan its `repay()`
+ *    accepts tokens unchecked, so a pre-funded request could hand them
+ *    to a bound intent's `pull()` — funds no flash loan backs. The
+ *    balance is read live on every call and never cached.
  *
  *  - `acceptedFlashLoanRequestExecutors` — every `_ROLE_0` executor on
  *    a Morpho flash-loan request MUST be on this set.
@@ -189,6 +198,9 @@ export const DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS = 80 * 24 * 60 * 6
  *
  * The retargetter path (see `acceptedRetargetters`) never produces an
  * entry: its data is live operation state, read fresh on every call.
+ * Likewise a flash-loan request's asset balance is never part of an
+ * entry — it moves with every transfer, so it is read on every call,
+ * cache hit or not.
  *
  * `holders` is a plain `Map<Address, bigint>` for parity with
  * `scanRoleHolders`. Cross-process cache adapters (Redis, KV) MUST
@@ -279,6 +291,12 @@ export type A1Deps = {
  *   3. puller role on request contract is held only by accepted parties  (422)
  *   4. consumer role on request contract is held only by accepted parties (422)
  *   5. deadline within MAX_DEADLINE_SECONDS_AHEAD of now              (422)
+ *
+ * A request contract matched by an accepted flash-loan factory replaces
+ * checks 3–4 with "executor role on flash-loan request is held only by
+ * accepted parties" and "flash-loan request holds no balance of its
+ * asset", the latter backed by a live `asset()` + `balanceOf` read that
+ * runs on cache hits too.
  *
  * A `requestContract` on the policy's optional `trustedRequestContracts`
  * set short-circuits ahead of both stages below: checks 1–4 are emitted
@@ -443,7 +461,72 @@ export async function runA1(
     }
   }
 
-  return rollupA1(evaluateA1(onChain, chainId, policy, deadlineCheck));
+  // ── Flash-loan balance (live) ────────────────────────────────────
+  // Read after the cache lookup, never stored: the balance moves with
+  // every transfer, so a cached zero would be stale the moment anyone
+  // sent the request tokens.
+  let flashLoanBalance: FlashLoanBalanceData | undefined;
+  if (
+    onChain.kind !== "noFactory" &&
+    isOnChainSet(policy.acceptedFlashLoanRequestFactories, chainId, onChain.factory)
+  ) {
+    const fetched = await fetchFlashLoanBalance(ctx, requestContract);
+    if (fetched.isErr()) return Result.err(fetched.error);
+    flashLoanBalance = fetched.value;
+  }
+
+  return rollupA1(evaluateA1(onChain, chainId, policy, deadlineCheck, flashLoanBalance));
+}
+
+/**
+ * Live state read for a flash-loan request: its `asset()` and that
+ * token's balance held by the request. Deliberately NOT part of
+ * {@link A1OnChainData} — see {@link runA1}.
+ */
+type FlashLoanBalanceData = {
+  readonly asset: Address;
+  readonly balance: bigint;
+};
+
+/**
+ * Reads `asset()` on the flash-loan request, then `balanceOf(request)`
+ * on that asset. Both run only once an accepted flash-loan factory has
+ * vouched for the contract, so a failure — transport or deterministic —
+ * is never the client's fault: it is logged at error level and fails
+ * 503, never a cached 422.
+ */
+async function fetchFlashLoanBalance(
+  ctx: SigningContext,
+  requestContract: Address,
+): Promise<Result<FlashLoanBalanceData, UpstreamUnavailableError>> {
+  try {
+    const [asset] = await ctx.client.multicall({
+      contracts: [
+        { address: requestContract, abi: morphoFlashLoanRequestAbi, functionName: "asset" },
+      ] as const,
+      allowFailure: false,
+    });
+    const [balance] = await ctx.client.multicall({
+      contracts: [
+        { address: asset, abi: erc20Abi, functionName: "balanceOf", args: [requestContract] },
+      ] as const,
+      allowFailure: false,
+    });
+    return Result.ok({ asset, balance });
+  } catch (e) {
+    ctx.logger.error(
+      { err: sanitizeErr(e), requestContract },
+      isDeterministicContractCallFailure(e, ["asset", "balanceOf"])
+        ? "A.1: flash-loan request did not answer asset() / balanceOf(); check the factory configuration"
+        : "A.1: flash-loan request balance read failed upstream",
+    );
+    return Result.err(
+      new UpstreamUnavailableError({
+        message: "flash-loan request balance read failed upstream",
+        status: 503,
+      }),
+    );
+  }
 }
 
 /**
@@ -750,6 +833,7 @@ function evaluateA1(
   chainId: number,
   policy: IntentRequestBindingPolicy,
   deadlineCheck: CheckEntry,
+  flashLoanBalance?: FlashLoanBalanceData,
 ): readonly CheckEntry[] {
   if (data.kind === "noFactory") {
     return [
@@ -812,7 +896,13 @@ function evaluateA1(
             holders: holdersOf(data.holders, ROLE_PULLER),
             accepted: policy.acceptedFlashLoanRequestExecutors?.get(chainId) ?? new Set<string>(),
           });
-    return [factoryCheck, ownerCheck, executorCheck, deadlineCheck];
+    return [
+      factoryCheck,
+      ownerCheck,
+      executorCheck,
+      checkFlashLoanBalance(flashLoanBalance),
+      deadlineCheck,
+    ];
   }
 
   let pullerCheck: CheckEntry;
@@ -851,6 +941,21 @@ function evaluateA1(
   }
 
   return [factoryCheck, ownerCheck, pullerCheck, consumerCheck, deadlineCheck];
+}
+
+/**
+ * A flash-loan request must hold none of its asset when it is bound:
+ * outside a flash loan its `repay()` accepts tokens unchecked, and a
+ * bound intent could `pull()` them. Fails closed when the balance was
+ * not read.
+ */
+function checkFlashLoanBalance(data: FlashLoanBalanceData | undefined): CheckEntry {
+  const description = "flash-loan request holds no balance of its asset";
+  if (data === undefined) return failed(description, "asset balance was not read");
+  if (data.balance !== 0n) {
+    return failed(description, `request contract holds ${data.balance} of asset ${data.asset}`);
+  }
+  return passed(description);
 }
 
 /**

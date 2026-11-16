@@ -564,6 +564,15 @@ limit equal to the configured range never reject a chunk.
   listed retargetter is bypassed rather than replayed. A listed retargetter that does not
   answer `operation()` is an operator misconfiguration and fails `503`, never a cached
   client-blamed `422`. Every other request contract takes the classic path unchanged.
+- **Flash-loan requests** — a request contract matched by an accepted
+  `acceptedFlashLoanRequestFactories` entry (`isFlashLoanRequest(addr)`) replaces the
+  puller / consumer checks with two others: every executor (`_ROLE_0`) holder must be on
+  `acceptedFlashLoanRequestExecutors`, and the request must hold a zero balance of its
+  `asset()` at bind time. Outside a flash loan `MorphoFlashLoanRequest.repay()` accepts
+  tokens unchecked, so a pre-funded request could hand them to a bound intent's `pull()`
+  with no flash loan behind them. The balance (`asset()` then `balanceOf`) is read live on
+  every call, cache hit or not, and never cached; a failed read is `503`, never a `422`.
+  §A.4 whitelist ops inherit both checks per request contract.
 - **Scan budget** — `eventScanDeadlineMs` (optional) bounds a single scan's wall clock;
   when exceeded the request fails `503 upstream_unavailable` instead of holding the
   handler indefinitely.
@@ -601,6 +610,8 @@ type IntentRequestBindingPolicy = {
   acceptedRetargetters?:    ReadonlyMap<number, ReadonlySet<string>>; // owner listed ⇒ retargetter path
   minRetargetterRepaymentBufferSeconds?: number; // default 80 days (DEFAULT_MIN_RETARGETTER_REPAYMENT_BUFFER_SECONDS)
   acceptedRequestFactories: ReadonlyMap<number, ReadonlySet<string>>;
+  acceptedFlashLoanRequestFactories?: ReadonlyMap<number, ReadonlySet<string>>; // matched ⇒ executor + zero-balance checks
+  acceptedFlashLoanRequestExecutors?: ReadonlyMap<number, ReadonlySet<string>>;
   acceptedOwners:           ReadonlyMap<number, ReadonlySet<string>>;
   acceptedPullers:          ReadonlyMap<number, ReadonlySet<string>>;
   acceptedConsumers:        ReadonlyMap<number, ReadonlySet<string>>;

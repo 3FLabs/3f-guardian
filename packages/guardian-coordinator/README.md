@@ -68,7 +68,9 @@ Optional env:
   serve it, the scan runs as before. `skip` always scans the window, since partial
   in-window data is its only rogue-grant evidence.
 - `GUARDIAN_MAX_NONCE_ABOVE_FLOOR` default `100`, for request-whitelisting nonce windows
-- `GUARDIAN_FLASH_LOAN_REQUEST_FACTORIES` optional `chainId=addr,addr;chainId=addr`
+- `GUARDIAN_FLASH_LOAN_REQUEST_FACTORIES` optional `chainId=addr,addr;chainId=addr`.
+  Request contracts from these factories must hold a zero balance of their `asset()` when
+  bound (read live on every request, never cached).
 - `GUARDIAN_FLASH_LOAN_REQUEST_EXECUTORS` optional `chainId=addr,addr;chainId=addr`
 - `GUARDIAN_ACCEPTED_WHITELIST_BOOKS` optional `chainId=addr,addr;chainId=addr`
 - `GUARDIAN_TRUSTED_REQUEST_CONTRACTS` optional `chainId=addr,addr;chainId=addr`.

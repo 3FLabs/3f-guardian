@@ -32,6 +32,20 @@ export const requestFactoryAbi = [
   },
 ] as const;
 
+/**
+ * Minimal ABI for `MorphoFlashLoanRequest` — `asset()` (`IHasAsset`),
+ * the token whose balance §A.1 requires to be zero at bind time.
+ */
+export const morphoFlashLoanRequestAbi = [
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "asset",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+  },
+] as const;
+
 /** Minimal ABI for `MorphoFlashLoanRequestFactory`. */
 export const morphoFlashLoanRequestFactoryAbi = [
   {

@@ -272,46 +272,160 @@ describe("buildIntentRequestBindingChecks", () => {
     expect(r.isOk()).toBe(true);
   });
 
-  it("passes for an accepted Morpho flash-loan request factory", async () => {
-    const stub = makeClient({
-      multicallResponses: [[OWNER, true]],
-      latestBlock: 5_500n,
-      getLogs: () => [
-        {
-          address: FLASH_LOAN_FACTORY,
-          eventName: "FlashLoanRequestCreated",
-          blockNumber: 5_000n,
-          logIndex: 0,
-          args: { flashLoanRequest: RC },
-        },
-        {
-          address: RC,
-          eventName: "RolesUpdated",
-          blockNumber: 5_000n,
-          logIndex: 1,
-          args: { user: PULLER, roles: ROLE_PULLER },
-        },
-      ],
-    });
-    const run = buildIntentRequestBindingChecks({
-      policy: {
-        ...policy,
-        acceptedRequestFactories: new Map(),
-        acceptedFlashLoanRequestFactories: new Map([[1, new Set<string>([FLASH_LOAN_FACTORY])]]),
-        acceptedFlashLoanRequestExecutors: new Map([[1, new Set<string>([PULLER])]]),
+  describe("Morpho flash-loan requests", () => {
+    const ASSET = "0x000000000000000000000000000000000000a55e" as Address;
+
+    const flashLoanPolicy: IntentRequestBindingPolicy = {
+      ...policy,
+      acceptedRequestFactories: new Map(),
+      acceptedFlashLoanRequestFactories: new Map([[1, new Set<string>([FLASH_LOAN_FACTORY])]]),
+      acceptedFlashLoanRequestExecutors: new Map([[1, new Set<string>([PULLER])]]),
+    };
+
+    const flashLoanLogs = () => [
+      {
+        address: FLASH_LOAN_FACTORY,
+        eventName: "FlashLoanRequestCreated" as const,
+        blockNumber: 5_000n,
+        logIndex: 0,
+        args: { flashLoanRequest: RC },
       },
+      {
+        address: RC,
+        eventName: "RolesUpdated" as const,
+        blockNumber: 5_000n,
+        logIndex: 1,
+        args: { user: PULLER, roles: ROLE_PULLER },
+      },
+    ];
+
+    it("passes for an accepted Morpho flash-loan request factory with a zero asset balance", async () => {
+      const stub = makeClient({
+        multicallResponses: [[OWNER, true], [ASSET], [0n]],
+        latestBlock: 5_500n,
+        getLogs: flashLoanLogs,
+      });
+      const run = buildIntentRequestBindingChecks({ policy: flashLoanPolicy });
+
+      const result = await run(ctx(stub.client), baseBody);
+
+      if (result.isErr()) throw result.error;
+      expect(result.value.map((check) => check.description)).toEqual([
+        "request contract was deployed by an accepted factory",
+        "owner of request contract is on the accepted-owners list",
+        "executor role on flash-loan request is held only by accepted parties",
+        "flash-loan request holds no balance of its asset",
+        "deadline within MAX_DEADLINE_SECONDS_AHEAD of now",
+      ]);
+      expect(result.value.every((check) => check.passed)).toBe(true);
+      expect(stub.multicalls).toEqual([
+        { functionNames: ["owner", "isFlashLoanRequest"] },
+        { functionNames: ["asset"] },
+        { functionNames: ["balanceOf"] },
+      ]);
     });
 
-    const result = await run(ctx(stub.client), baseBody);
+    it("fails when the flash-loan request holds a balance of its asset", async () => {
+      const stub = makeClient({
+        multicallResponses: [[OWNER, true], [ASSET], [1n]],
+        latestBlock: 5_500n,
+        getLogs: flashLoanLogs,
+      });
+      const run = buildIntentRequestBindingChecks({ policy: flashLoanPolicy });
 
-    if (result.isErr()) throw result.error;
-    expect(result.value.map((check) => check.description)).toEqual([
-      "request contract was deployed by an accepted factory",
-      "owner of request contract is on the accepted-owners list",
-      "executor role on flash-loan request is held only by accepted parties",
-      "deadline within MAX_DEADLINE_SECONDS_AHEAD of now",
-    ]);
-    expect(stub.multicalls).toEqual([{ functionNames: ["owner", "isFlashLoanRequest"] }]);
+      const r = await run(ctx(stub.client), baseBody);
+
+      expect(r.isErr()).toBe(true);
+      if (r.isErr()) {
+        expect(r.error).toBeInstanceOf(ValidationFailedError);
+        const checks = (r.error as ValidationFailedError).checks;
+        const balance = checks.find(
+          (c) => c.description === "flash-loan request holds no balance of its asset",
+        );
+        expect(balance?.passed).toBe(false);
+        expect(balance?.reason).toBe(`request contract holds 1 of asset ${ASSET}`);
+        // Every other check still passes: the balance alone rejects.
+        expect(checks.filter((c) => !c.passed)).toHaveLength(1);
+      }
+    });
+
+    it("re-reads the balance on a cache hit instead of replaying it", async () => {
+      const stub = makeClient({
+        multicallResponses: [[OWNER, true], [ASSET], [0n], [ASSET], [5n]],
+        latestBlock: 5_500n,
+        getLogs: flashLoanLogs,
+      });
+      const cache = inMemoryCache(zA1OnChainData);
+      const run = buildIntentRequestBindingChecks({ policy: flashLoanPolicy, cache });
+
+      const first = await run(ctx(stub.client), baseBody);
+      expect(first.isOk()).toBe(true);
+      const second = await run(ctx(stub.client), baseBody);
+      expect(second.isErr()).toBe(true);
+
+      // Second call: no provenance multicall, no scan — only the live balance read.
+      expect(stub.multicalls.slice(3)).toEqual([
+        { functionNames: ["asset"] },
+        { functionNames: ["balanceOf"] },
+      ]);
+      expect(stub.getLogsCalls).toBe(1);
+      const cached = await cache.get(`1:${RC.toLowerCase()}`);
+      expect(cached).not.toHaveProperty("balance");
+    });
+
+    it("returns 503 when the balance read fails, never a 422", async () => {
+      const stub = makeClient({
+        multicallResponses: [[OWNER, true], new HttpRequestError({ url: "http://rpc" })],
+        latestBlock: 5_500n,
+        getLogs: flashLoanLogs,
+      });
+      const run = buildIntentRequestBindingChecks({ policy: flashLoanPolicy });
+
+      const r = await run(ctx(stub.client), baseBody);
+
+      expect(r.isErr()).toBe(true);
+      if (r.isErr()) expect(r.error).toBeInstanceOf(UpstreamUnavailableError);
+    });
+
+    it("does not read a balance for classic-factory requests", async () => {
+      // Only one multicall response is queued: a balance read would throw
+      // "unexpected multicall #2".
+      const stub = makeClient({
+        multicallResponses: [[OWNER, true, false]],
+        latestBlock: 5_500n,
+        getLogs: () => [
+          {
+            address: FACTORY,
+            eventName: "RequestCreated",
+            blockNumber: 5_000n,
+            logIndex: 0,
+            args: { request: RC },
+          },
+          {
+            address: RC,
+            eventName: "RolesUpdated",
+            blockNumber: 5_000n,
+            logIndex: 1,
+            args: { user: PULLER, roles: ROLE_PULLER | ROLE_CONSUMER },
+          },
+        ],
+      });
+      const run = buildIntentRequestBindingChecks({
+        policy: {
+          ...flashLoanPolicy,
+          acceptedRequestFactories: policy.acceptedRequestFactories,
+          acceptedConsumers: new Map([[1, new Set<string>([PULLER])]]),
+        },
+      });
+
+      const result = await run(ctx(stub.client), baseBody);
+
+      if (result.isErr()) throw result.error;
+      expect(result.value.map((c) => c.description)).not.toContain(
+        "flash-loan request holds no balance of its asset",
+      );
+      expect(stub.multicalls).toHaveLength(1);
+    });
   });
 
   it("fails when no accepted factory recognises the request", async () => {
